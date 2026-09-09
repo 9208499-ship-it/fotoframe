@@ -1,0 +1,19 @@
+# Сборка
+build/
+.gradle/
+.cxx/
+*.apk
+*.aab
+
+# Android Studio
+.idea/
+*.iml
+local.properties
+keystore.properties
+*.jks
+*.keystore
+captures/
+
+# Резервные копии патчей и мусор macOS
+.patch*_backup_*/
+.DS_Store
