@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -141,6 +143,10 @@ fun SlideshowScreen(
             // Увеличение относится только к кадру на экране; уходящему
             // кадру в анимации перехода оно не передаётся.
             val isCurrent = target.photo.id == slide.photo.id
+            val effect = transitionEffect(resolvedTransition, state.settings.transitionMillis)
+            val flash = flashAlpha(resolvedTransition, state.settings.transitionMillis)
+
+            Box(effect) {
             SlideImage(
                 slide = target,
                 fitMode = state.settings.fitMode,
@@ -149,17 +155,30 @@ fun SlideshowScreen(
                 portraitFitWhole = state.settings.portraitFitWhole,
                 intervalMillis = state.settings.intervalSeconds * 1000,
                 zoomStrength = state.settings.zoomStrength,
+                zoomPace = state.settings.zoomPace,
+                zoomWithoutFace = state.settings.zoomWithoutFace,
                 zoom = if (isCurrent) state.zoom else 1f,
                 panX = if (isCurrent) state.panX else 0f,
                 panY = if (isCurrent) state.panY else 0f,
                 onLoadError = { onLoadError(target.photo.id) },
                 onLoadSuccess = { onLoadSuccess(target.photo.id) }
             )
+            if (flash > 0.01f) {
+                Box(Modifier.matchParentSize().background(Color.White.copy(alpha = flash)))
+            }
+            }
         }
 
         Overlay(state, Modifier.align(Alignment.BottomStart))
 
         if (state.zoomed) ZoomBadge(state.zoom, Modifier.align(Alignment.TopEnd))
+
+        // Пауза без значка выглядит как зависшая рамка — так и было:
+        // случайное нажатие OK останавливало показ, и понять это было
+        // невозможно.
+        if (state.paused || state.inHistory) {
+            PauseBadge(state.inHistory, Modifier.align(Alignment.TopEnd))
+        }
 
         // Сообщение поверх кадра — например, что снимки не загружаются.
         // Без кадра оно показывается в EmptyState.
@@ -319,6 +338,27 @@ private fun ActionMenuOverlay(
             color = Color.White.copy(alpha = 0.45f),
             fontSize = 14.sp,
             modifier = Modifier.padding(top = 8.dp)
+        )
+    }
+}
+
+/** Две полоски, как на любом плеере, плюс подсказка, чем продолжить. */
+@Composable
+private fun PauseBadge(inHistory: Boolean, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .padding(40.dp)
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(Modifier.width(6.dp).height(22.dp).background(Color.White))
+        Box(Modifier.width(6.dp).height(22.dp).background(Color.White))
+        androidx.compose.material3.Text(
+            text = if (inHistory) "Просмотр истории — OK вернёт к показу" else "Пауза — OK продолжит",
+            color = Color.White,
+            fontSize = 18.sp
         )
     }
 }

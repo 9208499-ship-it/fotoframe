@@ -28,6 +28,19 @@ enum class Transition {
     SLIDE,
     ZOOM_BLUR,
     PUSH_UP,
+
+    /** Кадры как грани куба: старый уходит в глубину, новый выезжает. */
+    CUBE,
+
+    /** Новый кадр раскрывается кругом из центра. */
+    CIRCLE,
+
+    /** Новый кадр наезжает шторкой слева направо. */
+    WIPE,
+
+    /** Смена через белую вспышку. */
+    FLASH,
+
     RANDOM
 }
 
@@ -73,6 +86,20 @@ data class SlideshowSettings(
      * интервалом смены, а этим ползунком — насколько далеко он уедет.
      */
     val zoomStrength: Float = 1.12f,
+
+    /**
+     * Доля показа, за которую наезд успевает пройти. 1.0 — движение
+     * растянуто на весь кадр (спокойно), 0.3 — заканчивается за треть
+     * показа и дальше кадр стоит крупным планом (заметно). При коротком
+     * интервале только этим и получается сделать наезд быстрым.
+     */
+    val zoomPace: Float = 1f,
+
+    /**
+     * Наезд в режимах «целиком» и без лица в кадре — тогда просто от
+     * центра. Иначе такие снимки стоят неподвижно.
+     */
+    val zoomWithoutFace: Boolean = true,
 
     /**
      * Подбирать пару вертикальных по содержимому: снимок с людьми — к
@@ -175,6 +202,8 @@ class SettingsStore(private val context: Context) {
         val faceFocus = booleanPreferencesKey("face_focus")
         val fitFaceZoom = booleanPreferencesKey("fit_face_zoom")
         val zoomStrength = floatPreferencesKey("zoom_strength")
+        val zoomPace = floatPreferencesKey("zoom_pace")
+        val zoomWithoutFace = booleanPreferencesKey("zoom_without_face")
         val pairByContent = booleanPreferencesKey("pair_by_content")
         val showWeather = booleanPreferencesKey("show_weather")
         val weatherLat = floatPreferencesKey("weather_lat")
@@ -223,6 +252,8 @@ class SettingsStore(private val context: Context) {
             faceFocus = p[Keys.faceFocus] ?: defaults.faceFocus,
             fitFaceZoom = p[Keys.fitFaceZoom] ?: defaults.fitFaceZoom,
             zoomStrength = p[Keys.zoomStrength] ?: defaults.zoomStrength,
+            zoomPace = p[Keys.zoomPace] ?: defaults.zoomPace,
+            zoomWithoutFace = p[Keys.zoomWithoutFace] ?: defaults.zoomWithoutFace,
             pairByContent = p[Keys.pairByContent] ?: defaults.pairByContent,
             showWeather = p[Keys.showWeather] ?: defaults.showWeather,
             weatherLat = p[Keys.weatherLat] ?: defaults.weatherLat,
@@ -263,6 +294,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setFaceFocus(v: Boolean) = edit { it[Keys.faceFocus] = v }
     suspend fun setFitFaceZoom(v: Boolean) = edit { it[Keys.fitFaceZoom] = v }
     suspend fun setZoomStrength(v: Float) = edit { it[Keys.zoomStrength] = v }
+    suspend fun setZoomPace(v: Float) = edit { it[Keys.zoomPace] = v }
+    suspend fun setZoomWithoutFace(v: Boolean) = edit { it[Keys.zoomWithoutFace] = v }
     suspend fun setPairByContent(v: Boolean) = edit { it[Keys.pairByContent] = v }
     suspend fun setShowWeather(v: Boolean) = edit { it[Keys.showWeather] = v }
 

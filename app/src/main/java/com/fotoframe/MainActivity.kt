@@ -156,6 +156,8 @@ class MainActivity : ComponentActivity() {
                         onFaceFocusChange = { lifecycleScope.launch { store.setFaceFocus(it) } },
                         onFitFaceZoomChange = { lifecycleScope.launch { store.setFitFaceZoom(it) } },
                         onZoomStrengthChange = { lifecycleScope.launch { store.setZoomStrength(it) } },
+                        onZoomPaceChange = { lifecycleScope.launch { store.setZoomPace(it) } },
+                        onZoomWithoutFaceChange = { lifecycleScope.launch { store.setZoomWithoutFace(it) } },
                         onPairByContentChange = { lifecycleScope.launch { store.setPairByContent(it) } },
                         onShowWeatherChange = {
                             lifecycleScope.launch {
@@ -389,6 +391,17 @@ class MainActivity : ComponentActivity() {
     private var menuArmed = false
     private var menuOpenedAt = 0L
 
+    /**
+     * Было ли нажатие OK начато на самом показе.
+     *
+     * OK обрабатывается на отпускании — иначе не отличить короткое
+     * нажатие от долгого. Но кнопку «Вернуться к показу» в настройках
+     * тоже нажимают этим OK: настройки закрываются по нажатию, а
+     * отпускание прилетает уже в показ и ставит паузу. Со стороны это
+     * выглядит как зависшая рамка, потому что индикатора паузы не было.
+     */
+    private var okPressedHere = false
+
     private fun openActionMenu(armed: Boolean) {
         menuArmed = armed
         menuOpenedAt = android.os.SystemClock.uptimeMillis()
@@ -405,14 +418,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
         if (slideshowVisible && isOk(keyCode) && event != null) {
+            val startedHere = okPressedHere
+            okPressedHere = false
+
             if (vm.state.value.menu != null) {
                 // Кнопку отпустили — теперь меню можно подтверждать.
                 menuArmed = true
-            } else if (event.isTracking && !event.isCanceled) {
+            } else if (startedHere && event.isTracking && !event.isCanceled) {
                 if (vm.state.value.zoomed) vm.resetZoom() else vm.togglePause()
             }
             return true
         }
+        okPressedHere = false
         return super.onKeyUp(keyCode, event)
     }
 
@@ -460,6 +477,7 @@ class MainActivity : ComponentActivity() {
 
         // OK — только запуск отслеживания; действие решается на отпускании.
         if (isOk(keyCode)) {
+            okPressedHere = true
             event?.startTracking()
             return true
         }

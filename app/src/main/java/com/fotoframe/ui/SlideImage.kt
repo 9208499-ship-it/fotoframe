@@ -96,6 +96,10 @@ fun SlideImage(
     fitFaceZoom: Boolean = true,
     /** Глубина наезда за показ; 1.0 — движения нет. */
     zoomStrength: Float = 1.12f,
+    /** Доля показа, за которую наезд успевает пройти. */
+    zoomPace: Float = 1f,
+    /** Наезжать и на кадрах без лица — от центра. */
+    zoomWithoutFace: Boolean = true,
     zoom: Float = 1f,
     panX: Float = 0f,
     panY: Float = 0f,
@@ -120,6 +124,8 @@ fun SlideImage(
         faceFocus = faceFocus,
         fitFaceZoom = fitFaceZoom,
         zoomStrength = zoomStrength,
+        zoomPace = zoomPace,
+        zoomWithoutFace = zoomWithoutFace,
         portraitFitWhole = portraitFitWhole,
         intervalMillis = intervalMillis,
         zoom = zoomAnim,
@@ -298,6 +304,8 @@ private fun SinglePhoto(
     faceFocus: Boolean,
     fitFaceZoom: Boolean,
     zoomStrength: Float,
+    zoomPace: Float,
+    zoomWithoutFace: Boolean,
     portraitFitWhole: Boolean,
     intervalMillis: Int,
     zoom: Float,
@@ -408,10 +416,17 @@ private fun SinglePhoto(
         // Наезд к лицу на вписанном снимке: только горизонтальные, только
         // с лицом, только пока не включено ручное увеличение.
         val fitPlan = remember(photo.id, boxW, boxH, imageW, imageH, focusX, focusY, cropped, hasFace, fitFaceZoom, manual, portrait) {
-            if (fitFaceZoom && zoomStrength > 1.001f && !cropped && hasFace && knownSize &&
-                !portrait && !manual && boxW > 0f && boxH > 0f
+            // Без лица наезд идёт от центра, если это разрешено настройкой:
+            // иначе половина коллекции — пейзажи и снимки без людей —
+            // стояла бы неподвижно.
+            if (fitFaceZoom && zoomStrength > 1.001f && !cropped && (hasFace || zoomWithoutFace) &&
+                knownSize && !portrait && !manual && boxW > 0f && boxH > 0f
             ) {
-                fitZoomPlan(boxW, boxH, imageW, imageH, focusX, focusY)
+                fitZoomPlan(
+                    boxW, boxH, imageW, imageH,
+                    if (hasFace) focusX else 0.5f,
+                    if (hasFace) focusY else 0.5f
+                )
             } else {
                 null
             }
@@ -424,7 +439,7 @@ private fun SinglePhoto(
         val fitProgress by animateFloatAsState(
             targetValue = if (started && fitPlan != null) 1f else 0f,
             animationSpec = tween(
-                durationMillis = if (fitPlan != null) intervalMillis + 2000 else 0,
+                durationMillis = if (fitPlan != null) zoomDuration(intervalMillis, zoomPace) else 0,
                 easing = LinearEasing
             ),
             label = "fitzoom"
@@ -432,7 +447,7 @@ private fun SinglePhoto(
         val scale by animateFloatAsState(
             targetValue = if (started) zoomStrength else 1f,
             animationSpec = tween(
-                durationMillis = if (kenBurns) intervalMillis + 2000 else 0,
+                durationMillis = if (kenBurns) zoomDuration(intervalMillis, zoomPace) else 0,
                 easing = LinearEasing
             ),
             label = "kenburns"
@@ -599,6 +614,15 @@ internal fun fitZoomPlan(
         translationY = shift(boxH, zoomedH, focusY)
     )
 }
+
+/**
+ * Сколько длится наезд. При pace = 1 он растянут на весь показ плюс
+ * пара секунд на переход; при меньших значениях заканчивается раньше, и
+ * дальше кадр стоит крупным планом. Нижняя граница в полторы секунды —
+ * чтобы при коротком интервале движение не превращалось в рывок.
+ */
+internal fun zoomDuration(intervalMillis: Int, pace: Float): Int =
+    ((intervalMillis + 2000) * pace.coerceIn(0.15f, 1f)).toInt().coerceAtLeast(1500)
 
 /** Предел наезда на вписанном снимке: дальше узкие кадры расплываются. */
 internal const val FIT_ZOOM_MAX = 1.35f

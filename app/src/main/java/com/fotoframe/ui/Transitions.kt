@@ -55,6 +55,14 @@ object Transitions {
                     initialOffsetY = { it / 8 }
                 )
 
+            // Куб, круг и шторка рисуются модификатором в TransitionEffects:
+            // здесь фаза перехода нужна почти мгновенная, иначе кадр
+            // просвечивает и эффект теряется.
+            Transition.CUBE, Transition.CIRCLE, Transition.WIPE ->
+                fadeIn(tween(FLASH_SNAP_MS))
+
+            Transition.FLASH -> fadeIn(tween(durationMillis / 2, delayMillis = durationMillis / 2))
+
             else -> fadeIn(tween(durationMillis))
         }
 
@@ -80,14 +88,29 @@ object Transitions {
                     targetOffsetY = { -it / 8 }
                 )
 
+            Transition.CUBE -> fadeOut(tween(durationMillis, easing = LinearEasing))
+
+            // Уходящий кадр остаётся на месте, пока его закрывает новый.
+            Transition.CIRCLE, Transition.WIPE ->
+                fadeOut(tween(FLASH_SNAP_MS, delayMillis = durationMillis))
+
+            Transition.FLASH -> fadeOut(tween(durationMillis / 2))
+
             else -> fadeOut(tween(durationMillis))
         }
+
+    /** Мгновенная фаза: эффект рисует не прозрачность, а сам модификатор. */
+    private const val FLASH_SNAP_MS = 1
 
     private val REAL_EFFECTS = listOf(
         Transition.CROSSFADE,
         Transition.SLIDE,
         Transition.ZOOM_BLUR,
-        Transition.PUSH_UP
+        Transition.PUSH_UP,
+        Transition.CUBE,
+        Transition.CIRCLE,
+        Transition.WIPE,
+        Transition.FLASH
     )
 
     fun label(t: Transition): String = when (t) {
@@ -95,6 +118,10 @@ object Transitions {
         Transition.SLIDE -> "Сдвиг вбок"
         Transition.ZOOM_BLUR -> "Наплыв"
         Transition.PUSH_UP -> "Сдвиг вверх"
+        Transition.CUBE -> "Куб"
+        Transition.CIRCLE -> "Круг"
+        Transition.WIPE -> "Шторка"
+        Transition.FLASH -> "Вспышка"
         Transition.RANDOM -> "Чередовать все"
     }
 }

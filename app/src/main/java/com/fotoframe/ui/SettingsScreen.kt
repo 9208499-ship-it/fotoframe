@@ -70,6 +70,8 @@ fun SettingsScreen(
     onFaceFocusChange: (Boolean) -> Unit,
     onFitFaceZoomChange: (Boolean) -> Unit,
     onZoomStrengthChange: (Float) -> Unit,
+    onZoomPaceChange: (Float) -> Unit,
+    onZoomWithoutFaceChange: (Boolean) -> Unit,
     onPairByContentChange: (Boolean) -> Unit,
     onShowWeatherChange: (Boolean) -> Unit,
     cities: List<City> = emptyList(),
@@ -246,6 +248,32 @@ fun SettingsScreen(
                 onShowWeatherChange = onShowWeatherChange,
                 onSearch = onCitySearch,
                 onPick = onCityPick
+            )
+        }
+
+        item {
+            val p = settings.zoomPace
+            StepperRow(
+                title = "Скорость наезда",
+                caption = when {
+                    p >= 0.95f -> "Движение растянуто на весь показ — самое спокойное"
+                    p >= 0.65f -> "Наезд заканчивается раньше смены кадра"
+                    p >= 0.35f -> "Быстрый наезд, дальше кадр стоит крупным планом"
+                    else -> "Очень быстрый наезд в начале показа"
+                } + ". При коротком интервале только этим и получается ускорить движение",
+                value = "${(p * 100).toInt()}% показа",
+                onPrev = { onZoomPaceChange((p - 0.15f).coerceAtLeast(0.15f)) },
+                onNext = { onZoomPaceChange((p + 0.15f).coerceAtMost(1f)) }
+            )
+        }
+
+        item {
+            SwitchRow(
+                title = "Наезд и на кадрах без лица",
+                subtitle = "Если лица в кадре нет, камера наезжает от центра. Выключено — " +
+                    "такие снимки стоят неподвижно",
+                checked = settings.zoomWithoutFace,
+                onChange = onZoomWithoutFaceChange
             )
         }
 

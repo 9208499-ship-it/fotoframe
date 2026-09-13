@@ -223,6 +223,14 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                     delay(wait.coerceAtMost(1000))
                     continue
                 }
+                // Сторож: если кадр висит втрое дольше интервала, значит
+                // предыдущая смена где-то застряла. Пишем в лог и меняем
+                // кадр принудительно — рамка на стене не должна замирать
+                // из-за одной неудачной подготовки.
+                val stuckFor = System.currentTimeMillis() - lastAdvanceAt
+                if (stuckFor > s.settings.intervalSeconds * 3000L) {
+                    Log.w(TAG, "Кадр висит ${stuckFor / 1000} с — принудительная смена")
+                }
                 advance()
             }
         }
