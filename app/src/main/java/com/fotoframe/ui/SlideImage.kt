@@ -23,6 +23,8 @@ import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -31,6 +33,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.size.Precision
 import com.fotoframe.data.db.Photo
 import com.fotoframe.data.prefs.FitMode
 import com.fotoframe.engine.Slide
@@ -188,7 +191,7 @@ private fun PairOfPortraits(
                 BlurredBackdrop(slide.displayUrl, Modifier.weight(1f).fillMaxHeight())
                 BlurredBackdrop(slide.secondUrl.orEmpty(), Modifier.weight(1f).fillMaxHeight())
             }
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = BACKDROP_DIM)))
         }
 
         val boxW = constraints.maxWidth.toFloat()
@@ -209,7 +212,24 @@ private fun PairOfPortraits(
             height = available / (aspectLeft + aspectRight)
         }
 
-        val heightDp = with(density) { height.toDp() }
+        // Пара уже экрана — по бокам оставались поля, и с размытой
+        // подложкой они выглядели как рамка вокруг рамки. Если недостаток
+        // ширины невелик, растягиваем пару на всю ширину, а лишнее по
+        // высоте срезаем у обоих снимков — так же, как «во весь экран»
+        // делает с одиночным кадром. Два узких снимка 9:16 на панели 16:9
+        // потребовали бы срезать треть — столько не режем, там поля
+        // честнее.
+        val fill = if (widthAtFullHeight < available) {
+            available / widthAtFullHeight
+        } else {
+            1f
+        }
+        val cropToFill = fill > 1.001f && fill <= PAIR_FILL_MAX
+        val tileHeight = height
+        val leftWidth = if (cropToFill) available * aspectLeft / (aspectLeft + aspectRight) else height * aspectLeft
+        val rightWidth = if (cropToFill) available - leftWidth else height * aspectRight
+
+        val heightDp = with(density) { tileHeight.toDp() }
 
         // Пара увеличивается как одно целое — вместе с разделителем.
         Row(
@@ -219,8 +239,10 @@ private fun PairOfPortraits(
             PhotoTile(
                 url = slide.displayUrl,
                 description = slide.photo.displayName,
-                width = with(density) { (height * aspectLeft).toDp() },
+                width = with(density) { leftWidth.toDp() },
                 height = heightDp,
+                crop = cropToFill,
+                focusY = slide.photo.focusY.takeIf { slide.photo.faceCount > 0 } ?: 0.5f,
                 onLoadError = onLoadError,
                 onLoadSuccess = onLoadSuccess
             )
@@ -233,8 +255,10 @@ private fun PairOfPortraits(
             PhotoTile(
                 url = slide.secondUrl.orEmpty(),
                 description = slide.second?.displayName.orEmpty(),
-                width = with(density) { (height * aspectRight).toDp() },
+                width = with(density) { rightWidth.toDp() },
                 height = heightDp,
+                crop = cropToFill,
+                focusY = slide.second?.let { p -> p.focusY.takeIf { p.faceCount > 0 } } ?: 0.5f,
                 onLoadError = onLoadError,
                 onLoadSuccess = {}
             )
@@ -243,23 +267,43 @@ private fun PairOfPortraits(
 }
 
 /**
- * Размытая подложка под половину экрана. Размытие даёт само
- * масштабирование крошечной копии, поэтому работает и до Android 12,
- * где Modifier.blur ничего не делает.
+ * Размытая подложка под кадр. Размытие даёт само масштабирование
+ * крошечной копии, поэтому работает и до Android 12, где Modifier.blur
+ * ничего не делает.
+ *
+ * Точность запроса — EXACT, и это важно. С точностью по умолчанию
+ * загрузчик, найдя ту же картинку в памяти в полном размере, отдаёт её
+ * вместо крошечной, и до Android 12 по бокам показывался не фон, а
+ * резкий увеличенный кадр. Именно так это и выглядело у людей.
+ *
+ * Плюс заглушённая яркость и насыщенность: фон должен ощущаться
+ * подложкой, а не второй картинкой — особенно когда на снимке люди.
  */
 @Composable
 private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val blurred = modifier.let {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) it.blur(24.dp) else it
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) it.blur(32.dp) else it
     }
     AsyncImage(
-        model = ImageRequest.Builder(context).data(url).size(24, 32).build(),
+        model = ImageRequest.Builder(context)
+            .data(url)
+            .size(BACKDROP_PX, BACKDROP_PX)
+            .precision(Precision.EXACT)
+            .allowHardware(false)
+            .build(),
         contentDescription = null,
         contentScale = ContentScale.Crop,
+        colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.55f) }),
         modifier = blurred
     )
 }
+
+/** Размер крошечной копии для подложки: меньше — мыльнее. */
+private const val BACKDROP_PX = 20
+
+/** Затемнение подложки. */
+private const val BACKDROP_DIM = 0.55f
 
 /** Снимок точно в заданном прямоугольнике — он уже посчитан по пропорциям. */
 @Composable
@@ -268,13 +312,19 @@ private fun PhotoTile(
     description: String,
     width: androidx.compose.ui.unit.Dp,
     height: androidx.compose.ui.unit.Dp,
+    /** Срезать лишнее по высоте, чтобы заполнить плитку целиком. */
+    crop: Boolean = false,
+    /** Где по вертикали лицо (0..1) — обрезка держит его в кадре. */
+    focusY: Float = 0.5f,
     onLoadError: () -> Unit,
     onLoadSuccess: () -> Unit
 ) {
     AsyncImage(
         model = url,
         contentDescription = description,
-        contentScale = ContentScale.Fit,
+        contentScale = if (crop) ContentScale.Crop else ContentScale.Fit,
+        // BiasAlignment: −1 — верх, 0 — центр, 1 — низ.
+        alignment = BiasAlignment(0f, (focusY * 2f - 1f).coerceIn(-1f, 1f)),
         onError = { onLoadError() },
         onSuccess = { onLoadSuccess() },
         modifier = Modifier.width(width).height(height)
@@ -356,21 +406,10 @@ private fun SinglePhoto(
             // версии Android. Modifier.blur добавляет гладкости, но до
             // Android 12 он ничего не делает, поэтому опираться только
             // на него нельзя.
-            val bg = Modifier.fillMaxSize().let {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) it.blur(24.dp) else it
-            }
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(url)
-                    .size(48, 27)
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = bg
-            )
+            BlurredBackdrop(url, Modifier.fillMaxSize())
             // Затемнение отдельным слоем поверх фона: background в цепочке
             // модификаторов картинки рисуется под ней и не виден.
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = BACKDROP_DIM)))
         }
 
         val manual = zoom > 1.001f
@@ -631,4 +670,10 @@ internal const val FIT_ZOOM_MAX = 1.35f
 private val PAIR_SEPARATOR = 8.dp
 
 /** Поля вокруг пары, чтобы кадры не упирались в края экрана. */
-private val PAIR_MARGIN = 24.dp
+private val PAIR_MARGIN = 0.dp
+
+/**
+ * До какого коэффициента пара растягивается на всю ширину с обрезкой по
+ * высоте. 1.25 — срезается не больше пятой части; выше остаются поля.
+ */
+private const val PAIR_FILL_MAX = 1.25f
