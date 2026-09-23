@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -245,11 +246,29 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
             )
         }
         // Погода сразу под часами и датой: это про «сейчас», в отличие
-        // от подписей снимка ниже, которые про «тогда».
+        // от подписей снимка ниже, которые про «тогда». Город — в той же
+        // строке: без него место съёмки снимка, стоящее следом, читалось
+        // как место погоды («+15°, облачно» и под ним «Южное»).
         state.weather?.let {
-            Text(text = it.line, fontSize = 22.sp, alpha = 0.85f)
+            val city = settings.weatherPlace.takeIf { p -> settings.showWeatherCity && p.isNotBlank() }
+            Text(
+                text = if (city != null) "${it.line} · $city" else it.line,
+                fontSize = 22.sp,
+                alpha = 0.85f
+            )
         }
         val photo = state.current?.photo
+        val hasPhotoCaption = photo != null && (
+            (settings.showPhotoDate && photo.takenAtExact) ||
+                (settings.showLocation && !photo.placeName.isNullOrBlank()) ||
+                settings.showFileName
+            )
+        // Подписи снимка — отдельным блоком, с отступом от «сейчас».
+        if (hasPhotoCaption &&
+            (settings.showClock || settings.showDate || state.weather != null)
+        ) {
+            Spacer(Modifier.height(14.dp))
+        }
         // Только настоящая дата съёмки: у файлов с сетевой папки до разбора
         // EXIF в takenAt лежит дата копирования, и её показывать не надо.
         if (settings.showPhotoDate && photo != null && photo.takenAtExact) {

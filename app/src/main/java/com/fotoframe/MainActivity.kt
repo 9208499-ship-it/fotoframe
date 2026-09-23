@@ -172,6 +172,21 @@ class MainActivity : ComponentActivity() {
                         },
                         cities = cities,
                         onCitySearch = { vm.searchCity(it) },
+                        onYandexWeatherKeyChange = { key ->
+                            lifecycleScope.launch {
+                                store.setYandexWeatherKey(key)
+                                vm.refreshWeather()
+                                status = if (key.isBlank()) "Ключ Яндекс Погоды убран"
+                                else "Ключ сохранён, погода обновится через несколько секунд"
+                            }
+                        },
+                        weatherSource = state.weather?.source,
+                        onYandexRefreshChange = { h ->
+                            lifecycleScope.launch { store.setYandexRefreshHours(h) }
+                        },
+                        onShowWeatherCityChange = {
+                            lifecycleScope.launch { store.setShowWeatherCity(it) }
+                        },
                         onCityPick = { city ->
                             lifecycleScope.launch {
                                 store.setWeatherPlace(city.name, city.lat, city.lon)

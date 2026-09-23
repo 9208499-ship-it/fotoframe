@@ -81,6 +81,11 @@ fun SettingsScreen(
     cities: List<City> = emptyList(),
     onCitySearch: (String) -> Unit = {},
     onCityPick: (City) -> Unit = {},
+    onYandexWeatherKeyChange: (String) -> Unit = {},
+    onYandexRefreshChange: (Int) -> Unit = {},
+    onShowWeatherCityChange: (Boolean) -> Unit = {},
+    /** Кто сейчас отдаёт погоду — для проверки ключа. */
+    weatherSource: String? = null,
     onPortraitFitWholeChange: (Boolean) -> Unit,
     onPairPortraitsChange: (Boolean) -> Unit,
     onRecencyBiasChange: (Float) -> Unit,
@@ -266,7 +271,11 @@ fun SettingsScreen(
                 cities = cities,
                 onShowWeatherChange = onShowWeatherChange,
                 onSearch = onCitySearch,
-                onPick = onCityPick
+                onPick = onCityPick,
+                onYandexKey = onYandexWeatherKeyChange,
+                onYandexRefresh = onYandexRefreshChange,
+                onShowCity = onShowWeatherCityChange,
+                source = weatherSource
             )
         }
 
@@ -749,9 +758,14 @@ private fun WeatherCard(
     cities: List<City>,
     onShowWeatherChange: (Boolean) -> Unit,
     onSearch: (String) -> Unit,
-    onPick: (City) -> Unit
+    onPick: (City) -> Unit,
+    onYandexKey: (String) -> Unit = {},
+    onYandexRefresh: (Int) -> Unit = {},
+    onShowCity: (Boolean) -> Unit = {},
+    source: String? = null
 ) {
     var query by remember { mutableStateOf("") }
+    var yKey by remember(settings.yandexWeatherKey) { mutableStateOf(settings.yandexWeatherKey) }
 
     RowCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -766,7 +780,10 @@ private fun WeatherCard(
                         if (settings.weatherPlace.isBlank()) {
                             "Температура рядом с часами. Выберите город"
                         } else {
-                            "Город: ${settings.weatherPlace}"
+                            // Координаты рядом с названием: одноимённых городов
+                            // много (Санкт-Петербург есть и во Флориде), и по
+                            // одному названию ошибку выбора не заметить.
+                            "Город: ${settings.weatherPlace} · ${coordText(settings.weatherLat, settings.weatherLon)}"
                         },
                         color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
                     )
@@ -796,25 +813,72 @@ private fun WeatherCard(
                     ) {
                         Column {
                             Text(city.name, color = Color.White, fontSize = 18.sp)
-                            if (city.region.isNotBlank()) {
-                                Text(
-                                    city.region,
-                                    color = Color.White.copy(alpha = 0.5f),
-                                    fontSize = 14.sp
-                                )
-                            }
+                            Text(
+                                listOf(city.region, coordText(city.lat, city.lon))
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · "),
+                                color = Color.White.copy(alpha = 0.5f),
+                                fontSize = 14.sp
+                            )
                         }
                     }
                 }
 
+                SwitchRow(
+                    "Город в строке погоды",
+                    "«☁ +12°, пасмурно · Санкт-Петербург». Удобно при настройке — сразу видно, " +
+                        "для какого города погода",
+                    settings.showWeatherCity, onShowCity
+                )
+
+                LabeledField(
+                    "Ключ Яндекс Погоды (необязательно)",
+                    "Личный ключ из кабинета «Погода для умного дома»",
+                    yKey,
+                    isPassword = true
+                ) { yKey = it }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(onClick = { onYandexKey(yKey) }) { Text("Сохранить ключ") }
+                    if (yKey.isNotBlank()) {
+                        Button(onClick = { yKey = ""; onYandexKey("") }) { Text("Убрать ключ") }
+                    }
+                }
+
+                if (settings.yandexWeatherKey.isNotBlank()) {
+                    val h = settings.yandexRefreshHours
+                    val perDay = 24 / h
+                    StepperRow(
+                        title = "Как часто спрашивать Яндекс",
+                        caption = "Около $perDay запросов в сутки с этого устройства. У бесплатного " +
+                            "тарифа 30 в сутки на ключ — если ключ стоит на нескольких устройствах, " +
+                            "их запросы складываются. Между обновлениями показывается последний " +
+                            "ответ Яндекса",
+                        value = "раз в $h ч",
+                        onPrev = { onYandexRefresh((h - 1).coerceAtLeast(1)) },
+                        onNext = { onYandexRefresh((h + 1).coerceAtMost(6)) }
+                    )
+                }
+
                 Text(
-                    "Данные Open-Meteo, обновляются раз в полчаса. Без сети подпись " +
-                        "просто не показывается.",
+                    (if (source.isNullOrBlank()) "" else "Сейчас отвечает: $source. ") +
+                        "Без ключа — бесплатные поставщики: Open-Meteo, met.no, wttr.in, " +
+                        "по очереди. С ключом первым спрашивается Яндекс. Обновление раз в " +
+                        "полчаса; без сети подпись не показывается.",
                     color = Color.White.copy(alpha = 0.45f), fontSize = 13.sp
                 )
             }
         }
     }
+}
+
+/** «59.94° с. ш., 30.31° в. д.» — со знаками сторон света, как привычно. */
+private fun coordText(lat: Float, lon: Float): String {
+    val ns = if (lat >= 0) "с. ш." else "ю. ш."
+    val ew = if (lon >= 0) "в. д." else "з. д."
+    return "%.2f° %s, %.2f° %s".format(java.util.Locale.US, kotlin.math.abs(lat), ns, kotlin.math.abs(lon), ew)
 }
 
 /**

@@ -131,6 +131,24 @@ data class SlideshowSettings(
     val weatherPlace: String = "",
 
     /**
+     * Личный ключ Яндекс Погоды, необязательный. Бесплатный тариф
+     * «Погода для умного дома» — только для некоммерческого использования,
+     * ключ у каждого свой. Задан — Яндекс спрашивается первым.
+     */
+    val yandexWeatherKey: String = "",
+
+    /**
+     * Как часто спрашивать Яндекс, в часах. У бесплатного тарифа 30
+     * запросов в сутки на ключ, и полчаса, как у бесплатных поставщиков,
+     * — это 48 на одно устройство. Раз в два часа — 12 на устройство:
+     * укладываются и два устройства на одном ключе.
+     */
+    val yandexRefreshHours: Int = 2,
+
+    /** Дописывать город в строку погоды на экране. */
+    val showWeatherCity: Boolean = false,
+
+    /**
      * Насколько сильно новые снимки вытесняют старые.
      * 1 — без приоритета, 5 — половина показов из свежих 4% коллекции.
      */
@@ -224,6 +242,9 @@ class SettingsStore(private val context: Context) {
         val weatherLat = floatPreferencesKey("weather_lat")
         val weatherLon = floatPreferencesKey("weather_lon")
         val weatherPlace = stringPreferencesKey("weather_place")
+        val yandexWeatherKey = stringPreferencesKey("yandex_weather_key")
+        val yandexRefreshHours = intPreferencesKey("yandex_refresh_hours")
+        val showWeatherCity = booleanPreferencesKey("show_weather_city")
         val recencyBias = floatPreferencesKey("recency_bias")
         val freshBoost = floatPreferencesKey("fresh_boost")
         val freshWindowDays = intPreferencesKey("fresh_window_days")
@@ -276,6 +297,9 @@ class SettingsStore(private val context: Context) {
             weatherLat = p[Keys.weatherLat] ?: defaults.weatherLat,
             weatherLon = p[Keys.weatherLon] ?: defaults.weatherLon,
             weatherPlace = p[Keys.weatherPlace] ?: defaults.weatherPlace,
+            yandexWeatherKey = p[Keys.yandexWeatherKey] ?: defaults.yandexWeatherKey,
+            yandexRefreshHours = p[Keys.yandexRefreshHours] ?: defaults.yandexRefreshHours,
+            showWeatherCity = p[Keys.showWeatherCity] ?: defaults.showWeatherCity,
             recencyBias = p[Keys.recencyBias] ?: defaults.recencyBias,
             freshBoost = p[Keys.freshBoost] ?: defaults.freshBoost,
             freshWindowDays = p[Keys.freshWindowDays] ?: defaults.freshWindowDays,
@@ -317,6 +341,10 @@ class SettingsStore(private val context: Context) {
     suspend fun setSkipSimilar(v: Boolean) = edit { it[Keys.skipSimilar] = v }
     suspend fun setPairByContent(v: Boolean) = edit { it[Keys.pairByContent] = v }
     suspend fun setShowWeather(v: Boolean) = edit { it[Keys.showWeather] = v }
+
+    suspend fun setYandexWeatherKey(v: String) = edit { it[Keys.yandexWeatherKey] = v.trim() }
+    suspend fun setYandexRefreshHours(v: Int) = edit { it[Keys.yandexRefreshHours] = v.coerceIn(1, 6) }
+    suspend fun setShowWeatherCity(v: Boolean) = edit { it[Keys.showWeatherCity] = v }
 
     suspend fun setWeatherPlace(name: String, lat: Float, lon: Float) = edit {
         it[Keys.weatherPlace] = name

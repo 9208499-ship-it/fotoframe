@@ -614,7 +614,10 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 val s = application.settingsStore.settings.first()
                 if (s.showWeather && (s.weatherLat != 0f || s.weatherLon != 0f)) {
                     val w = tryOrNull {
-                        weatherService.current(s.weatherLat.toDouble(), s.weatherLon.toDouble())
+                        weatherService.current(
+                            s.weatherLat.toDouble(), s.weatherLon.toDouble(),
+                            s.yandexWeatherKey, s.yandexRefreshHours
+                        )
                     }
                     _state.value = _state.value.copy(weather = w)
                 } else if (_state.value.weather != null) {
@@ -626,7 +629,10 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Погоду просят обновить сразу — например, после выбора города. */
-    fun refreshWeather() = startWeather()
+    fun refreshWeather() {
+        weatherService.invalidate()
+        startWeather()
+    }
 
     /**
      * Поиск города для погоды. Тот же Open-Meteo, отдельная служба
@@ -642,7 +648,51 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun findCities(query: String): List<City> = withContext(Dispatchers.IO) {
+    /**
+     * Поиск города: сперва Open-Meteo, при его недоступности —
+     * OpenStreetMap (Nominatim), который приложение и так использует для
+     * подписей мест. Open-Meteo бывает недоступен из сети целиком.
+     */
+    private suspend fun findCities(query: String): List<City> =
+        findCitiesOpenMeteo(query).ifEmpty { findCitiesNominatim(query) }
+
+    private suspend fun findCitiesNominatim(query: String): List<City> = withContext(Dispatchers.IO) {
+        val url = "https://nominatim.openstreetmap.org/search" +
+            "?q=" + java.net.URLEncoder.encode(query.trim(), "UTF-8") +
+            "&format=jsonv2&limit=8&accept-language=ru&addressdetails=1"
+        val body = try {
+            application.sources.httpClient()
+                .newCall(
+                    okhttp3.Request.Builder().url(url)
+                        .header("User-Agent", "FotoFrame/0.8 (Android TV photo frame)")
+                        .build()
+                )
+                .execute()
+                .use { if (it.isSuccessful) it.body?.string() else null }
+        } catch (e: Exception) {
+            e.rethrowIfCancelled()
+            null
+        } ?: return@withContext emptyList()
+
+        val arr = runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(body) as? kotlinx.serialization.json.JsonArray
+        }.getOrNull() ?: return@withContext emptyList()
+
+        arr.mapNotNull { item ->
+            val o = item as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+            fun str(obj: kotlinx.serialization.json.JsonObject?, key: String) =
+                (obj?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.content
+            val lat = str(o, "lat")?.toFloatOrNull() ?: return@mapNotNull null
+            val lon = str(o, "lon")?.toFloatOrNull() ?: return@mapNotNull null
+            val addr = o["address"] as? kotlinx.serialization.json.JsonObject
+            val name = str(addr, "city") ?: str(addr, "town") ?: str(addr, "village")
+                ?: str(o, "name") ?: return@mapNotNull null
+            val region = listOfNotNull(str(addr, "state"), str(addr, "country")).joinToString(", ")
+            City(name = name, region = region, lat = lat, lon = lon)
+        }.distinctBy { it.name + it.region }
+    }
+
+    private suspend fun findCitiesOpenMeteo(query: String): List<City> = withContext(Dispatchers.IO) {
         val url = "https://geocoding-api.open-meteo.com/v1/search" +
             "?name=" + java.net.URLEncoder.encode(query.trim(), "UTF-8") +
             "&count=8&language=ru&format=json"
@@ -901,9 +951,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 val settings = _state.value.settings
-                val busy = queue.flatMap { it.photos.map { p -> p.id } }.toSet() +
-                    listOfNotNull(_state.value.current?.photo?.id)
-                val slide = buildSlide(settings, exclude = busy) ?: break
+                val slide = buildSlide(settings, exclude = reservedIds()) ?: break
                 queue.addLast(slide)
                 // Ближайшие — сразу в память, остальные лежат на диске.
                 if (queue.indexOf(slide) < MEMORY_AHEAD) warmToMemory(slide)
@@ -915,6 +963,15 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         fillJob?.cancel()
         queue.clear()
         if (loop?.isActive == true) ensureQueue()
+    }
+
+    /** Снимки, которые уже на экране, в очереди или только что показаны. */
+    private fun reservedIds(): Set<Long> {
+        val ids = HashSet<Long>()
+        _state.value.current?.photos?.forEach { ids += it.id }
+        queue.forEach { slide -> slide.photos.forEach { ids += it.id } }
+        history.takeLast(6).forEach { slide -> slide.photos.forEach { ids += it.id } }
+        return ids
     }
 
     private fun dropFromQueue(photoId: Long) {
@@ -1040,16 +1097,31 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         val people = if (byContent && photo.faceCount > 0) 1 else 0
         val noPeople = if (byContent && photo.faceCount == 0) 1 else 0
 
-        val candidate = dao.randomPortrait(photo.id, photo.albumName, cooldown, people, noPeople)
-            ?: dao.randomPortrait(photo.id, null, cooldown, people, noPeople)
-            ?: dao.randomPortrait(photo.id, null, 0L, people, noPeople)
-            ?: dao.leastRecentPortraitLike(photo.id, people, noPeople)
-            // Подходящих по содержимому не осталось — лучше пара
-            // «человек с салатом», чем одинокий кадр с широкими полями.
-            ?: dao.randomPortrait(photo.id, null, cooldown)
-            ?: dao.randomPortrait(photo.id, null, 0L)
-            ?: dao.leastRecentPortrait(photo.id)
-            ?: return null
+        // Снимки, уже занятые очередью готовых кадров и экраном, в пару
+        // не годятся: они ещё не отмечены показанными, и выборка их не
+        // отсекает. Без этого один и тот же снимок оказывался в двух
+        // соседних кадрах — один раз основным, второй раз партнёром.
+        val reserved = reservedIds()
+
+        suspend fun pick(): Photo? =
+            dao.randomPortrait(photo.id, photo.albumName, cooldown, people, noPeople)
+                ?: dao.randomPortrait(photo.id, null, cooldown, people, noPeople)
+                ?: dao.randomPortrait(photo.id, null, 0L, people, noPeople)
+                ?: dao.leastRecentPortraitLike(photo.id, people, noPeople)
+                // Подходящих по содержимому не осталось — лучше пара
+                // «человек с салатом», чем одинокий кадр с широкими полями.
+                ?: dao.randomPortrait(photo.id, null, cooldown)
+                ?: dao.randomPortrait(photo.id, null, 0L)
+                ?: dao.leastRecentPortrait(photo.id)
+
+        var found: Photo? = null
+        for (attempt in 0 until 5) {
+            val c = pick() ?: break
+            if (c.id !in reserved) { found = c; break }
+        }
+        // Неизменяемая копия — чтобы компилятор уверенно знал, что дальше
+        // там не null, в том числе внутри лямбд ниже.
+        val candidate = found ?: return null
 
         // Партнёр — не дубль первого кадра: два одинаковых снимка рядом
         // выглядят как ошибка. Проверка дешёвая, но работает только когда
