@@ -23,6 +23,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,9 +37,11 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fotoframe.data.db.Photo
+import kotlinx.coroutines.delay
 import com.fotoframe.engine.City
 import com.fotoframe.data.prefs.FitMode
 import com.fotoframe.data.prefs.PhotoOrder
@@ -72,6 +75,7 @@ fun SettingsScreen(
     onZoomStrengthChange: (Float) -> Unit,
     onZoomPaceChange: (Float) -> Unit,
     onZoomWithoutFaceChange: (Boolean) -> Unit,
+    onSkipSimilarChange: (Boolean) -> Unit,
     onPairByContentChange: (Boolean) -> Unit,
     onShowWeatherChange: (Boolean) -> Unit,
     cities: List<City> = emptyList(),
@@ -92,6 +96,7 @@ fun SettingsScreen(
     onShowDateChange: (Boolean) -> Unit,
     onShowPhotoDateChange: (Boolean) -> Unit,
     onShowLocationChange: (Boolean) -> Unit,
+    onShowFileNameChange: (Boolean) -> Unit = {},
     onKeepScreenOnChange: (Boolean) -> Unit,
     onYandexTokenChange: (String) -> Unit,
     /** Сохранить токен и, дождавшись записи, открыть обзор папок. */
@@ -105,6 +110,9 @@ fun SettingsScreen(
     onUnhide: (Long) -> Unit = {},
     onUnhideAll: () -> Unit = {},
     onDeleteHidden: () -> Unit = {},
+    /** Сколько записей от каждого источника в индексе. */
+    sourceCounts: Map<String, Int> = emptyMap(),
+    onRemoveSource: (String) -> Unit = {},
     onDiagnostics: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
@@ -180,6 +188,17 @@ fun SettingsScreen(
                 selected = settings.fitMode,
                 labelOf = ::fitLabel,
                 onSelect = onFitModeChange
+            )
+        }
+
+        item {
+            SwitchRow(
+                title = "Пропускать похожие снимки серии",
+                subtitle = "Из десяти кадров, снятых подряд с одной точки, за цикл показывается один. " +
+                    "Похожесть считается по отпечатку картинки, серия — та же папка и полторы " +
+                    "минуты по времени съёмки. Отпечатки досчитываются постепенно",
+                checked = settings.skipSimilar,
+                onChange = onSkipSimilarChange
             )
         }
 
@@ -270,8 +289,9 @@ fun SettingsScreen(
         item {
             SwitchRow(
                 title = "Наезд и на кадрах без лица",
-                subtitle = "Если лица в кадре нет, камера наезжает от центра. Выключено — " +
-                    "такие снимки стоят неподвижно",
+                subtitle = "Если лица в кадре нет, камера наезжает к самому заметному месту " +
+                    "снимка — горизонту, зданию, цветку; на ровном кадре — от центра. " +
+                    "Выключено — такие снимки стоят неподвижно",
                 checked = settings.zoomWithoutFace,
                 onChange = onZoomWithoutFaceChange
             )
@@ -411,6 +431,12 @@ fun SettingsScreen(
                         "Город определяется по координатам из снимка, если они есть",
                         settings.showLocation, onShowLocationChange
                     )
+                    SwitchRow(
+                        "Имя файла",
+                        "Для коллекций картин это обычно название работы. Без расширения, " +
+                            "подчёркивания заменены пробелами",
+                        settings.showFileName, onShowFileNameChange
+                    )
 
                     SectionTitle("Экран")
 
@@ -460,6 +486,13 @@ fun SettingsScreen(
                                     Text("Подключиться и выбрать папку")
                                 }
                             }
+
+                            SourceLeftovers(
+                                configured = !settings.yandexToken.isNullOrBlank(),
+                                count = sourceCounts["yandex"] ?: 0,
+                                title = "Диска",
+                                onRemove = { onRemoveSource("yandex") }
+                            )
                         }
                     }
 
@@ -487,6 +520,13 @@ fun SettingsScreen(
                                     "   ·   Папка: " + settings.smbFolder.ifBlank { "вся общая папка" },
                                 color = Color.White.copy(alpha = 0.7f),
                                 fontSize = 16.sp
+                            )
+
+                            SourceLeftovers(
+                                configured = settings.smbHost.isNotBlank() && settings.smbShare.isNotBlank(),
+                                count = sourceCounts["smb"] ?: 0,
+                                title = "сетевой папки",
+                                onRemove = { onRemoveSource("smb") }
                             )
 
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -545,12 +585,30 @@ fun SettingsScreen(
 
 /**
  * Панель состояния наверху экрана: отчёт об обновлении и диагностика.
- * Своя прокрутка на случай длинного текста — экран настроек при этом
- * листается независимо.
+ *
+ * Свёрнута до одной строки. Отчёт об обновлении бывает на десяток строк,
+ * и раскрытой панель занимала половину экрана планшета — а нужна она
+ * обычно один раз, сразу после нажатия. Поэтому новое сообщение
+ * показывается целиком [AUTO_COLLAPSE_MS], потом сворачивается само;
+ * открыть и закрыть можно нажатием в любой момент.
  */
 @Composable
 private fun StatusPanel(message: String?) {
     if (message.isNullOrBlank()) return
+
+    var expanded by remember(message) { mutableStateOf(true) }
+    val multiline = message.contains('\n')
+
+    // Сворачиваем сами, но только длинные: короткое «Готово» мельтешить
+    // не будет, а прятать его незачем.
+    LaunchedEffect(message) {
+        if (multiline) {
+            delay(AUTO_COLLAPSE_MS)
+            expanded = false
+        }
+    }
+
+    val firstLine = message.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
 
     Card(
         shape = RoundedCornerShape(14.dp),
@@ -558,18 +616,34 @@ private fun StatusPanel(message: String?) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 14.dp)
+            .focusHighlight(RoundedCornerShape(14.dp))
+            .clickable(enabled = multiline) { expanded = !expanded }
     ) {
-        Text(
-            message,
-            color = Color(0xFF9CCC65),
-            fontSize = 16.sp,
-            modifier = Modifier
-                .heightIn(max = 220.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-        )
+        if (expanded) {
+            Text(
+                message,
+                color = Color(0xFF9CCC65),
+                fontSize = 16.sp,
+                modifier = Modifier
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+            )
+        } else {
+            Text(
+                firstLine + "   ·   нажмите, чтобы раскрыть",
+                color = Color(0xFF9CCC65),
+                fontSize = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+        }
     }
 }
+
+/** Через сколько длинный отчёт сворачивается сам. */
+private const val AUTO_COLLAPSE_MS = 8_000L
 
 /**
  * Поле ввода, пригодное для пульта.
@@ -739,6 +813,37 @@ private fun WeatherCard(
                     color = Color.White.copy(alpha = 0.45f), fontSize = 13.sp
                 )
             }
+        }
+    }
+}
+
+/**
+ * Записи отключённого источника, оставшиеся в индексе. В показ они не
+ * идут, но раздувают счётчики; удаляются в два нажатия.
+ */
+@Composable
+private fun SourceLeftovers(
+    configured: Boolean,
+    count: Int,
+    title: String,
+    onRemove: () -> Unit
+) {
+    if (configured || count == 0) return
+    var armed by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            "Источник отключён, но в индексе осталось $count снимков $title. В показ они " +
+                "не идут; удалите их, если не собираетесь подключать источник снова.",
+            color = Color.White.copy(alpha = 0.55f), fontSize = 15.sp
+        )
+        if (armed) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { armed = false }) { Text("Нет, оставить") }
+                Button(onClick = { armed = false; onRemove() }) { Text("Да, удалить из индекса") }
+            }
+        } else {
+            Button(onClick = { armed = true }) { Text("Удалить снимки $title из индекса") }
         }
     }
 }

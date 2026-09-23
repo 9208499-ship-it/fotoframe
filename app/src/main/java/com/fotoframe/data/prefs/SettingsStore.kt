@@ -102,6 +102,13 @@ data class SlideshowSettings(
     val zoomWithoutFace: Boolean = true,
 
     /**
+     * Пропускать серии почти одинаковых кадров: из десяти снимков с одной
+     * точки за цикл показывается один. Похожесть — по перцептивному хэшу,
+     * серия — та же папка и полторы минуты по времени съёмки.
+     */
+    val skipSimilar: Boolean = true,
+
+    /**
      * Подбирать пару вертикальных по содержимому: снимок с людьми — к
      * снимку с людьми, без людей — к такому же. Иначе рядом с портретом
      * оказывается тарелка с ужином, и пара выглядит случайной, каковой
@@ -139,6 +146,13 @@ data class SlideshowSettings(
     val showDate: Boolean = true,
     val showPhotoDate: Boolean = true,
     val showLocation: Boolean = true,
+
+    /**
+     * Имя файла под снимком. Для коллекций картин это по сути название
+     * работы: «Айвазовский_Девятый_вал.jpg». Показывается без расширения,
+     * подчёркивания — пробелами.
+     */
+    val showFileName: Boolean = false,
     val pairPortraits: Boolean = true,
 
     /**
@@ -204,6 +218,7 @@ class SettingsStore(private val context: Context) {
         val zoomStrength = floatPreferencesKey("zoom_strength")
         val zoomPace = floatPreferencesKey("zoom_pace")
         val zoomWithoutFace = booleanPreferencesKey("zoom_without_face")
+        val skipSimilar = booleanPreferencesKey("skip_similar")
         val pairByContent = booleanPreferencesKey("pair_by_content")
         val showWeather = booleanPreferencesKey("show_weather")
         val weatherLat = floatPreferencesKey("weather_lat")
@@ -216,6 +231,7 @@ class SettingsStore(private val context: Context) {
         val showDate = booleanPreferencesKey("show_date")
         val showPhotoDate = booleanPreferencesKey("show_photo_date")
         val showLocation = booleanPreferencesKey("show_location")
+        val showFileName = booleanPreferencesKey("show_file_name")
         val pairPortraits = booleanPreferencesKey("pair_portraits")
         val portraitFitWhole = booleanPreferencesKey("portrait_fit_whole")
         val keepScreenOn = booleanPreferencesKey("keep_screen_on")
@@ -254,6 +270,7 @@ class SettingsStore(private val context: Context) {
             zoomStrength = p[Keys.zoomStrength] ?: defaults.zoomStrength,
             zoomPace = p[Keys.zoomPace] ?: defaults.zoomPace,
             zoomWithoutFace = p[Keys.zoomWithoutFace] ?: defaults.zoomWithoutFace,
+            skipSimilar = p[Keys.skipSimilar] ?: defaults.skipSimilar,
             pairByContent = p[Keys.pairByContent] ?: defaults.pairByContent,
             showWeather = p[Keys.showWeather] ?: defaults.showWeather,
             weatherLat = p[Keys.weatherLat] ?: defaults.weatherLat,
@@ -266,6 +283,7 @@ class SettingsStore(private val context: Context) {
             showDate = p[Keys.showDate] ?: defaults.showDate,
             showPhotoDate = p[Keys.showPhotoDate] ?: defaults.showPhotoDate,
             showLocation = p[Keys.showLocation] ?: defaults.showLocation,
+            showFileName = p[Keys.showFileName] ?: defaults.showFileName,
             pairPortraits = p[Keys.pairPortraits] ?: defaults.pairPortraits,
             portraitFitWhole = p[Keys.portraitFitWhole] ?: defaults.portraitFitWhole,
             keepScreenOn = p[Keys.keepScreenOn] ?: defaults.keepScreenOn,
@@ -296,6 +314,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setZoomStrength(v: Float) = edit { it[Keys.zoomStrength] = v }
     suspend fun setZoomPace(v: Float) = edit { it[Keys.zoomPace] = v }
     suspend fun setZoomWithoutFace(v: Boolean) = edit { it[Keys.zoomWithoutFace] = v }
+    suspend fun setSkipSimilar(v: Boolean) = edit { it[Keys.skipSimilar] = v }
     suspend fun setPairByContent(v: Boolean) = edit { it[Keys.pairByContent] = v }
     suspend fun setShowWeather(v: Boolean) = edit { it[Keys.showWeather] = v }
 
@@ -311,6 +330,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setShowDate(v: Boolean) = edit { it[Keys.showDate] = v }
     suspend fun setShowPhotoDate(v: Boolean) = edit { it[Keys.showPhotoDate] = v }
     suspend fun setShowLocation(v: Boolean) = edit { it[Keys.showLocation] = v }
+    suspend fun setShowFileName(v: Boolean) = edit { it[Keys.showFileName] = v }
     suspend fun setPairPortraits(v: Boolean) = edit { it[Keys.pairPortraits] = v }
     suspend fun setPortraitFitWhole(v: Boolean) = edit { it[Keys.portraitFitWhole] = v }
     suspend fun setKeepScreenOn(v: Boolean) = edit { it[Keys.keepScreenOn] = v }

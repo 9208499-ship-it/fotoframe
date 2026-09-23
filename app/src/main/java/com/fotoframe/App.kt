@@ -5,6 +5,7 @@ import android.app.Application
 import android.os.Bundle
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.ExifOrientationPolicy
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.fotoframe.data.db.AppDatabase
@@ -101,6 +102,9 @@ class App : Application(), ImageLoaderFactory {
                     .putBoolean("dims_v8", true)
                     .putBoolean("faces_v9", true)
                     .putBoolean("dims_v10", true)
+                    .putBoolean("places_v11", true)
+                    .putBoolean("signals_v12", true)
+                    .putBoolean("sources_v14", true)
                     .apply()
                 return@launch
             }
@@ -164,6 +168,34 @@ class App : Application(), ImageLoaderFactory {
             if (!sp.getBoolean("dims_v10", false)) {
                 runCatching { dao.resetMetaWithoutDims() }
                     .onSuccess { sp.edit().putBoolean("dims_v10", true).apply() }
+            }
+            // places_v11: в подписи попадали названия на нечитаемых
+            // письменностях — «อ.กะทู้» вместо «Пхукет». Сбрасываем
+            // подписи, чтобы они пересчитались по новым правилам; сами
+            // координаты при этом сохранены, повторных чтений EXIF не
+            // будет, только обращения к геокодеру.
+            if (!sp.getBoolean("places_v11", false)) {
+                runCatching { dao.resetPlaces() }
+                    .onSuccess { sp.edit().putBoolean("places_v11", true).apply() }
+            }
+            // signals_v12: появились отпечаток картинки (для отсева серий)
+            // и заметность сцены (наезд без лиц). И то и другое считается
+            // в проходе поиска лиц — отправляем все снимки в него заново.
+            // Кадр на экране получает своё сразу, остальные — постепенно.
+            if (!sp.getBoolean("signals_v12", false)) {
+                runCatching { dao.resetFaces() }
+                    .onSuccess { sp.edit().putBoolean("signals_v12", true).apply() }
+            }
+            // sources_v14 (было v13; переименовано, потому что у одного из
+            // тестировщиков пересчёт прошёл со старым фильтром и поставил
+            // отметку «сделано»): фильтр стал исключать снимки отключённых
+            // источников, но пересчитывался только при смене настроек —
+            // а если источник отключили до обновления, смены не было, и
+            // его снимки так и шли в показ чёрными экранами. Пересчёт
+            // один раз здесь.
+            if (!sp.getBoolean("sources_v14", false)) {
+                runCatching { ContentFilter(dao).apply(settingsStore.settings.first()) }
+                    .onSuccess { sp.edit().putBoolean("sources_v14", true).apply() }
             }
             // filter_v5: фильтр переехал из SQL в Kotlin и стал понимать
             // кириллицу — пересчитываем допуск по всей коллекции.
@@ -231,6 +263,11 @@ class App : Application(), ImageLoaderFactory {
                     .build()
             }
             .respectCacheHeaders(false)
+            // Ориентацию из EXIF применять для всех форматов. По умолчанию
+            // загрузчик пропускает HEIC/HEIF — там ориентацию дороже
+            // читать, — и снимки с телефона, снятые вертикально, показывались
+            // боком. Цена: чуть больше чтения при первом раскодировании.
+            .bitmapFactoryExifOrientationPolicy(ExifOrientationPolicy.RESPECT_ALL)
             .crossfade(false) // сменой кадров управляет слой переходов
             .build()
 }

@@ -67,8 +67,11 @@ class PhotoEnricher(
 ) {
     /** Сколько снимков без координат уже расписано в лог подробно. */
     private var noGeoLogged = 0
+    // Русская локаль, а не системная: интерфейс всё равно русский, а с
+    // системной геокодер отдавал названия на местном языке — снимок из
+    // Таиланда подписывался «อ.กะทู้».
     private val geocoder: Geocoder? =
-        if (Geocoder.isPresent()) Geocoder(context, Locale.getDefault()) else null
+        if (Geocoder.isPresent()) Geocoder(context, Locale("ru")) else null
 
     /**
      * Полная дообработка коллекции: даты и координаты, затем города, затем
@@ -216,12 +219,22 @@ class PhotoEnricher(
             return photo.copy(faceTries = photo.faceTries + 1)
         }
 
-        val x = focus?.centerX ?: 0.5f
-        val y = focus?.centerY ?: 0.5f
+        val hash = runCatching { ImageSignals.dHash(bitmap) }.getOrNull()
+        if (hash != null) dao.setHash(photo.id, hash)
+
+        val scene = if (focus == null) runCatching { sceneFocus(bitmap) }.getOrNull() else null
+        val x = focus?.centerX ?: scene?.first ?: 0.5f
+        val y = focus?.centerY ?: scene?.second ?: 0.5f
         val n = focus?.faceCount ?: 0
         dao.setFocus(photo.id, x, y, n)
-        return photo.copy(focusX = x, focusY = y, faceCount = n)
+        return photo.copy(focusX = x, focusY = y, faceCount = n, phash = hash ?: photo.phash)
     }
+
+    /** Точка интереса на снимке без лиц — по заметности сцены. */
+    private fun sceneFocus(bitmap: Bitmap): Pair<Float, Float>? =
+        ImageSignals.salientFocus(
+            ImageSignals.gridOf(bitmap, ImageSignals.SALIENCY_W, ImageSignals.SALIENCY_H)
+        )
 
     /**
      * Заголовок одного файла: дата и координаты. Полное перечитывание HEIC
@@ -572,14 +585,38 @@ class PhotoEnricher(
             val address = runCatching { g.getFromLocation(lat, lon, 1) }
                 .getOrNull()?.firstOrNull()
             if (address != null) {
-                val name = address.locality
-                    ?: address.subAdminArea
-                    ?: address.adminArea
-                    ?: address.countryName
+                // Из нескольких уровней берём первый читаемый: у мелких
+                // районов перевода часто нет, а у провинции и страны он
+                // есть почти всегда.
+                val name = listOfNotNull(
+                    address.locality,
+                    address.subAdminArea,
+                    address.adminArea,
+                    address.countryName
+                ).firstOrNull { readable(it) }
                 if (!name.isNullOrBlank()) return name
             }
         }
         return lookupOnline(lat, lon)
+    }
+
+    /**
+     * Годится ли название для подписи. Отсеиваются надписи на письменностях,
+     * которых читатель русскоязычной рамки, скорее всего, не разберёт:
+     * тайская, китайская, арабская и прочие. Кириллица и латиница проходят —
+     * «Phuket» лучше, чем «อ.กะทู้», и лучше, чем пустая подпись.
+     */
+    private fun readable(name: String): Boolean {
+        val letters = name.filter { it.isLetter() }
+        if (letters.isEmpty()) return false
+        return letters.all {
+            val block = Character.UnicodeBlock.of(it)
+            block == Character.UnicodeBlock.CYRILLIC ||
+                block == Character.UnicodeBlock.BASIC_LATIN ||
+                block == Character.UnicodeBlock.LATIN_1_SUPPLEMENT ||
+                block == Character.UnicodeBlock.LATIN_EXTENDED_A ||
+                block == Character.UnicodeBlock.LATIN_EXTENDED_B
+        }
     }
 
     /**
@@ -623,8 +660,15 @@ class PhotoEnricher(
         fun field(key: String): String? =
             (address[key] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
 
-        field("city") ?: field("town") ?: field("village") ?: field("municipality")
-            ?: field("county") ?: field("state") ?: field("country") ?: ""
+        // Порядок от точного к общему; первое читаемое и берём. Русского
+        // названия у мелкого района может не быть, и тогда приходит
+        // местное — для подписи оно бесполезно, лучше подняться до
+        // провинции или страны.
+        val levels = listOfNotNull(
+            field("city"), field("town"), field("village"), field("municipality"),
+            field("county"), field("state"), field("country")
+        )
+        levels.firstOrNull { readable(it) } ?: ""
     }
 
     // ---------- 3. Лица ----------
@@ -664,6 +708,11 @@ class PhotoEnricher(
                 continue
             }
 
+            // Хэш и заметность считаются с той же копии до детектора:
+            // после него битмап освобождается.
+            runCatching { ImageSignals.dHash(bitmap) }.getOrNull()?.let { dao.setHash(photo.id, it) }
+            val sceneBeforeDetect = runCatching { sceneFocus(bitmap) }.getOrNull()
+
             val focus = try {
                 FaceFocusDetector.detect(InputImage.fromBitmap(bitmap, 0), bitmap.width, bitmap.height)
             } catch (e: Throwable) {
@@ -680,8 +729,10 @@ class PhotoEnricher(
             if (focus != null) {
                 dao.setFocus(photo.id, focus.centerX, focus.centerY, focus.faceCount)
             } else {
-                // Проверено, лиц нет — больше к снимку не возвращаемся.
-                dao.setFocus(photo.id, 0.5f, 0.5f, 0)
+                // Лиц нет — точку наезда даёт заметность сцены; если и её
+                // не выделить, центр. К снимку больше не возвращаемся.
+                val scene = sceneBeforeDetect
+                dao.setFocus(photo.id, scene?.first ?: 0.5f, scene?.second ?: 0.5f, 0)
             }
             touched++
             done++

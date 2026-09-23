@@ -78,6 +78,21 @@ data class Photo(
     val focusY: Float = -1f,
     val faceCount: Int = -1,
 
+    /**
+     * Перцептивный хэш (dHash, 64 бита) — чтобы узнавать серии почти
+     * одинаковых кадров. null — ещё не считали. Считается вместе с
+     * поиском лиц, на той же уменьшенной копии.
+     */
+    val phash: Long? = null,
+
+    /**
+     * Ручной поворот с пульта, градусы по часовой: 0, 90, 180, 270.
+     * Поверх ориентации из EXIF. Нужен снимкам, испорченным старыми
+     * программами: они поворачивали пиксели, но оставляли в EXIF прежнюю
+     * метку, и честное применение EXIF показывает их вверх ногами.
+     */
+    val rotation: Int = 0,
+
     /** Координаты съёмки из EXIF, если есть. Для подписи города. */
     val latitude: Double? = null,
     val longitude: Double? = null,
@@ -131,6 +146,7 @@ data class ThumbRow(
 /** Срез полей, по которым работает фильтр содержимого. */
 data class FilterRow(
     val id: Long,
+    val sourceId: String,
     val displayName: String,
     val albumName: String?,
     val width: Int,

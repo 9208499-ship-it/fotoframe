@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -242,6 +243,7 @@ private fun PairOfPortraits(
                 width = with(density) { leftWidth.toDp() },
                 height = heightDp,
                 crop = cropToFill,
+                rotation = slide.photo.rotation,
                 focusY = slide.photo.focusY.takeIf { slide.photo.faceCount > 0 } ?: 0.5f,
                 onLoadError = onLoadError,
                 onLoadSuccess = onLoadSuccess
@@ -258,6 +260,7 @@ private fun PairOfPortraits(
                 width = with(density) { rightWidth.toDp() },
                 height = heightDp,
                 crop = cropToFill,
+                rotation = slide.second?.rotation ?: 0,
                 focusY = slide.second?.let { p -> p.focusY.takeIf { p.faceCount > 0 } } ?: 0.5f,
                 onLoadError = onLoadError,
                 onLoadSuccess = {}
@@ -316,19 +319,38 @@ private fun PhotoTile(
     crop: Boolean = false,
     /** Где по вертикали лицо (0..1) — обрезка держит его в кадре. */
     focusY: Float = 0.5f,
+    /** Ручной поворот, градусы. */
+    rotation: Int = 0,
     onLoadError: () -> Unit,
     onLoadSuccess: () -> Unit
 ) {
-    AsyncImage(
-        model = url,
-        contentDescription = description,
-        contentScale = if (crop) ContentScale.Crop else ContentScale.Fit,
-        // BiasAlignment: −1 — верх, 0 — центр, 1 — низ.
-        alignment = BiasAlignment(0f, (focusY * 2f - 1f).coerceIn(-1f, 1f)),
-        onError = { onLoadError() },
-        onSuccess = { onLoadSuccess() },
-        modifier = Modifier.width(width).height(height)
-    )
+    val rot = ((rotation % 360) + 360) % 360
+    val sideways = rot == 90 || rot == 270
+    val image = @Composable { m: Modifier ->
+        AsyncImage(
+            model = url,
+            contentDescription = description,
+            contentScale = if (crop) ContentScale.Crop else ContentScale.Fit,
+            // BiasAlignment: −1 — верх, 0 — центр, 1 — низ.
+            alignment = BiasAlignment(0f, (focusY * 2f - 1f).coerceIn(-1f, 1f)),
+            onError = { onLoadError() },
+            onSuccess = { onLoadSuccess() },
+            modifier = m
+        )
+    }
+    if (rot == 0) {
+        image(Modifier.width(width).height(height))
+    } else {
+        // Тот же приём, что у одиночного кадра: рамка с переставленными
+        // сторонами, повёрнутая на месте.
+        Box(Modifier.width(width).height(height), contentAlignment = Alignment.Center) {
+            image(
+                Modifier
+                    .requiredSize(if (sideways) height else width, if (sideways) width else height)
+                    .graphicsLayer { rotationZ = rot.toFloat() }
+            )
+        }
+    }
 }
 
 /**
@@ -337,7 +359,10 @@ private fun PhotoTile(
  */
 private fun aspectOf(photo: com.fotoframe.data.db.Photo?): Float {
     if (photo == null || photo.width <= 0 || photo.height <= 0) return 0.75f
-    return (photo.width.toFloat() / photo.height.toFloat()).coerceIn(0.3f, 1f)
+    val sideways = photo.rotation % 180 != 0
+    val w = if (sideways) photo.height else photo.width
+    val h = if (sideways) photo.width else photo.height
+    return (w.toFloat() / h.toFloat()).coerceIn(0.3f, 1f)
 }
 
 /**
@@ -348,6 +373,80 @@ private fun aspectOf(photo: com.fotoframe.data.db.Photo?): Float {
  */
 @Composable
 private fun SinglePhoto(
+    photo: Photo,
+    url: String,
+    fitMode: FitMode,
+    faceFocus: Boolean,
+    fitFaceZoom: Boolean,
+    zoomStrength: Float,
+    zoomPace: Float,
+    zoomWithoutFace: Boolean,
+    portraitFitWhole: Boolean,
+    intervalMillis: Int,
+    zoom: Float,
+    panX: Float,
+    panY: Float,
+    onLoadError: () -> Unit,
+    onLoadSuccess: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // Ручной поворот на 90/270 — вокруг прямого показа с переставленными
+    // сторонами области: внутренняя рамка размером (высота × ширина)
+    // поворачивается и накрывает экран ровно. Вся арифметика кадрирования,
+    // лиц и наезда внутри остаётся прежней — она про рамку, а не про экран.
+    val rotation = ((photo.rotation % 360) + 360) % 360
+    if (rotation == 0) {
+        SinglePhotoUpright(photo = photo,
+        url = url,
+        fitMode = fitMode,
+        faceFocus = faceFocus,
+        fitFaceZoom = fitFaceZoom,
+        zoomStrength = zoomStrength,
+        zoomPace = zoomPace,
+        zoomWithoutFace = zoomWithoutFace,
+        portraitFitWhole = portraitFitWhole,
+        intervalMillis = intervalMillis,
+        zoom = zoom,
+        panX = panX,
+        panY = panY,
+        onLoadError = onLoadError,
+        onLoadSuccess = onLoadSuccess,
+        modifier = modifier)
+        return
+    }
+
+    BoxWithConstraints(modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        val density = LocalDensity.current
+        val sideways = rotation == 90 || rotation == 270
+        val innerW = with(density) { (if (sideways) constraints.maxHeight else constraints.maxWidth).toDp() }
+        val innerH = with(density) { (if (sideways) constraints.maxWidth else constraints.maxHeight).toDp() }
+        Box(
+            Modifier
+                .requiredSize(innerW, innerH)
+                .graphicsLayer { rotationZ = rotation.toFloat() }
+        ) {
+            SinglePhotoUpright(photo = photo,
+        url = url,
+        fitMode = fitMode,
+        faceFocus = faceFocus,
+        fitFaceZoom = fitFaceZoom,
+        zoomStrength = zoomStrength,
+        zoomPace = zoomPace,
+        zoomWithoutFace = zoomWithoutFace,
+        portraitFitWhole = portraitFitWhole,
+        intervalMillis = intervalMillis,
+        zoom = zoom,
+        panX = panX,
+        panY = panY,
+        onLoadError = onLoadError,
+        onLoadSuccess = onLoadSuccess,
+        modifier = Modifier)
+        }
+    }
+}
+
+@Composable
+private fun SinglePhotoUpright(
     photo: Photo,
     url: String,
     fitMode: FitMode,
@@ -419,12 +518,16 @@ private fun SinglePhoto(
         val cropped = effective == FitMode.KEN_BURNS || effective == FitMode.FILL
         val hasFace = faceFocus && photo.faceCount > 0 && photo.focusY >= 0f
 
-        // Куда смотреть в долях кадра: на лицо, а без лиц у вертикальных
-        // снимков — на верхнюю треть, где лица обычно и оказываются.
+        // Без лиц точку даёт заметность сцены — она записана в те же поля
+        // с faceCount = 0. Если снимок ещё не проверяли (-1), у
+        // вертикальных смотрим на верхнюю треть, где лица обычно и
+        // оказываются.
+        val hasScene = !hasFace && photo.faceCount == 0 && photo.focusX >= 0f
+        val hasFocus = hasFace || hasScene
 
-        val focusX = if (hasFace) photo.focusX else 0.5f
+        val focusX = if (hasFocus) photo.focusX else 0.5f
         val focusY = when {
-            hasFace -> photo.focusY
+            hasFocus -> photo.focusY
             portrait -> 0.33f
             else -> 0.5f
         }
@@ -461,11 +564,7 @@ private fun SinglePhoto(
             if (fitFaceZoom && zoomStrength > 1.001f && !cropped && (hasFace || zoomWithoutFace) &&
                 knownSize && !portrait && !manual && boxW > 0f && boxH > 0f
             ) {
-                fitZoomPlan(
-                    boxW, boxH, imageW, imageH,
-                    if (hasFace) focusX else 0.5f,
-                    if (hasFace) focusY else 0.5f
-                )
+                fitZoomPlan(boxW, boxH, imageW, imageH, focusX, focusY)
             } else {
                 null
             }

@@ -26,10 +26,17 @@ class ContentFilter(private val dao: PhotoDao) {
         val minPixels = (s.minMegapixels * 1_000_000).toLong()
         val minBytes = s.minFileSizeKb * 1024L
 
+        // Снимки источника, который сейчас не настроен, в показ не идут.
+        // Записи остаются: убрал токен на время — они спрятались, вернул —
+        // вернулись без переиндексации. Раньше они оставались в выборке,
+        // не загружались и давали пропуски и чёрные паузы.
+        val active = activeSources(s)
+
         val enable = ArrayList<Long>()
         val disable = ArrayList<Long>()
         for (r in rows) {
-            if (allowed(r, s, minPixels, minBytes)) enable += r.id else disable += r.id
+            val ok = r.sourceId in active && allowed(r, s, minPixels, minBytes)
+            if (ok) enable += r.id else disable += r.id
         }
 
         // По 500 за раз: у SQLite ограничение на число параметров в запросе.
@@ -37,6 +44,13 @@ class ContentFilter(private val dao: PhotoDao) {
         disable.chunked(CHUNK).forEach { dao.setEnabledByIds(it, false) }
 
         return Outcome(enabled = enable.size, hidden = disable.size)
+    }
+
+    /** Какие источники настроены. Устройство считается настроенным всегда. */
+    private fun activeSources(s: SlideshowSettings): Set<String> = buildSet {
+        add("local")
+        if (!s.yandexToken.isNullOrBlank()) add("yandex")
+        if (s.smbHost.isNotBlank() && s.smbShare.isNotBlank()) add("smb")
     }
 
     private fun allowed(r: FilterRow, s: SlideshowSettings, minPixels: Long, minBytes: Long): Boolean {

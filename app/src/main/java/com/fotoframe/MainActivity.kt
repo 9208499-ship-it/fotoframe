@@ -87,6 +87,7 @@ class MainActivity : ComponentActivity() {
 
                 val hidden by vm.hiddenPhotos.collectAsState()
                 val cities by vm.cities.collectAsState()
+                val sourceCounts by vm.sourceCounts.collectAsState()
 
                 // Запрос системного подтверждения приходит из ViewModel:
                 // там нет Activity, а показать диалог может только она.
@@ -102,7 +103,10 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(showSettings) {
                     applyImmersive(!showSettings)
-                    if (showSettings) vm.loadHidden()
+                    if (showSettings) {
+                        vm.loadHidden()
+                        vm.loadSourceCounts()
+                    }
                     // При входе в настройки — сводка по коллекции и текущему кадру.
                     if (showSettings) vm.showDiagnostics { status = it }
                 }
@@ -158,6 +162,7 @@ class MainActivity : ComponentActivity() {
                         onZoomStrengthChange = { lifecycleScope.launch { store.setZoomStrength(it) } },
                         onZoomPaceChange = { lifecycleScope.launch { store.setZoomPace(it) } },
                         onZoomWithoutFaceChange = { lifecycleScope.launch { store.setZoomWithoutFace(it) } },
+                        onSkipSimilarChange = { lifecycleScope.launch { store.setSkipSimilar(it) } },
                         onPairByContentChange = { lifecycleScope.launch { store.setPairByContent(it) } },
                         onShowWeatherChange = {
                             lifecycleScope.launch {
@@ -226,6 +231,9 @@ class MainActivity : ComponentActivity() {
                         onShowLocationChange = {
                             lifecycleScope.launch { store.setShowLocation(it) }
                         },
+                        onShowFileNameChange = {
+                            lifecycleScope.launch { store.setShowFileName(it) }
+                        },
                         onKeepScreenOnChange = {
                             lifecycleScope.launch { store.setKeepScreenOn(it) }
                         },
@@ -267,6 +275,11 @@ class MainActivity : ComponentActivity() {
                         hiddenPhotos = hidden,
                         onUnhide = { vm.unhide(it) },
                         onUnhideAll = { vm.unhideAll() },
+                        sourceCounts = sourceCounts,
+                        onRemoveSource = { id ->
+                            status = "Удаляю записи источника…"
+                            vm.removeSourcePhotos(id) { report -> status = report }
+                        },
                         onDeleteHidden = {
                             status = "Убираю скрытые файлы из хранилища…"
                             vm.deleteHidden { report -> status = report }

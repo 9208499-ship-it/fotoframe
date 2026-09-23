@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -212,7 +213,7 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
     val settings = state.settings
     if (!settings.showClock && !settings.showDate &&
         !settings.showPhotoDate && !settings.showLocation &&
-        state.weather == null
+        !settings.showFileName && state.weather == null
     ) return
 
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -265,8 +266,22 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
                 alpha = 0.75f
             )
         }
+        if (settings.showFileName && photo != null) {
+            Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
+        }
     }
 }
+
+/**
+ * Имя файла в виде подписи: без расширения, подчёркивания — пробелами,
+ * повторы пробелов схлопнуты. «Айвазовский_Девятый_вал.jpg» →
+ * «Айвазовский Девятый вал».
+ */
+internal fun fileTitle(name: String): String =
+    name.substringBeforeLast('.', name)
+        .replace('_', ' ')
+        .replace(Regex("\\s+"), " ")
+        .trim()
 
 /**
  * Меню действий над кадром. Управляется только с пульта: вверх/вниз —
@@ -416,7 +431,8 @@ private fun SecondCaption(
     val settings = state.settings
     val showDate = settings.showPhotoDate && photo.takenAtExact
     val showPlace = settings.showLocation && !photo.placeName.isNullOrBlank()
-    if (!showDate && !showPlace) return
+    val showName = settings.showFileName
+    if (!showDate && !showPlace && !showName) return
 
     Column(
         modifier = modifier.padding(40.dp),
@@ -432,6 +448,9 @@ private fun SecondCaption(
         }
         if (showPlace) {
             Text(text = photo.placeName!!, fontSize = 18.sp, alpha = 0.75f)
+        }
+        if (showName) {
+            Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
         }
     }
 }
@@ -466,19 +485,38 @@ private fun EmptyState(message: String?) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            androidx.compose.material3.Text(
-                text = "Показывать пока нечего",
-                color = Color.White,
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Light
-            )
-            androidx.compose.material3.Text(
-                text = message ?: "Нажмите кнопку меню, чтобы выбрать источник фотографий.",
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = 18.sp
-            )
+            if (message == null) {
+                // Кадра нет, но и ошибки нет — значит, первый кадр ещё
+                // готовится: качается с хранилища и раскодируется. Раньше
+                // тут сразу писалось «показывать нечего», и это была
+                // неправда.
+                CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f))
+                androidx.compose.material3.Text(
+                    text = "Готовлю первый кадр…",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Light
+                )
+                androidx.compose.material3.Text(
+                    text = "Снимок скачивается с хранилища. Обычно это несколько секунд.",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 17.sp
+                )
+            } else {
+                androidx.compose.material3.Text(
+                    text = "Показывать пока нечего",
+                    color = Color.White,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Light
+                )
+                androidx.compose.material3.Text(
+                    text = message,
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 18.sp
+                )
+            }
         }
     }
 }

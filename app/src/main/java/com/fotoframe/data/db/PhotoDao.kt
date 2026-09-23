@@ -186,6 +186,35 @@ interface PhotoDao {
 
     // ---------- Разовые сбросы ----------
 
+    @Query("UPDATE photos SET rotation = :degrees WHERE id = :id")
+    suspend fun setRotation(id: Long, degrees: Int)
+
+    // ---------- Серии похожих кадров ----------
+
+    @Query("UPDATE photos SET phash = :hash WHERE id = :id")
+    suspend fun setHash(id: Long, hash: Long)
+
+    /**
+     * Соседи по времени из той же папки с посчитанным хэшем, ещё не
+     * показанные в этом цикле. Похожесть решается уже в Kotlin: расстояние
+     * между хэшами в SQL не посчитать.
+     */
+    @Query(
+        """
+        SELECT * FROM photos
+        WHERE albumName = :album AND id != :id
+          AND takenAt BETWEEN :from AND :to
+          AND phash IS NOT NULL
+          AND enabled = 1 AND hidden = 0 AND shownInCycle = 0
+        LIMIT 40
+        """
+    )
+    suspend fun neighboursInTime(id: Long, album: String, from: Long, to: Long): List<Photo>
+
+    /** Снимки серии пропускаются в этом цикле — как показанные, но без счётчика. */
+    @Query("UPDATE photos SET shownInCycle = 1 WHERE id IN (:ids)")
+    suspend fun skipInCycle(ids: List<Long>)
+
     // ---------- Скрытые пользователем ----------
 
     @Query("UPDATE photos SET hidden = :hidden WHERE id = :id")
@@ -238,6 +267,14 @@ interface PhotoDao {
      * геокодер без сети отвечал пустым списком, и это считалось ответом.
      * Такие снимки уходят на перепроверку через OSM.
      */
+    /**
+     * Сбросить подписи мест, чтобы они пересчитались. Нужно после правки
+     * отбора названий: у снимков из Таиланда и Китая в базе осели
+     * подписи на местной письменности.
+     */
+    @Query("UPDATE photos SET placeName = NULL, placeTries = 0 WHERE placeName IS NOT NULL")
+    suspend fun resetPlaces()
+
     @Query("UPDATE photos SET placeName = NULL, placeTries = 0 WHERE placeName = ''")
     suspend fun resetEmptyPlaces(): Int
 
@@ -267,7 +304,7 @@ interface PhotoDao {
     // ---------- Фильтр содержимого ----------
 
     /** Всё, что нужно фильтру, без тяжёлых полей. Решение принимает ContentFilter. */
-    @Query("SELECT id, displayName, albumName, width, height, sizeBytes FROM photos")
+    @Query("SELECT id, sourceId, displayName, albumName, width, height, sizeBytes FROM photos")
     suspend fun filterRows(): List<FilterRow>
 
     @Query("UPDATE photos SET enabled = :enabled WHERE id IN (:ids)")
@@ -361,6 +398,14 @@ interface PhotoDao {
 
     @Query("SELECT COUNT(*) FROM photos WHERE enabled = 1 AND hidden = 0 AND sourceId = :sourceId")
     suspend fun countBySource(sourceId: String): Int
+
+    /** Всего записей от источника, включая отсеянные. */
+    @Query("SELECT COUNT(*) FROM photos WHERE sourceId = :sourceId")
+    suspend fun countAllBySource(sourceId: String): Int
+
+    /** Убрать из индекса всё от источника — вместе с историей показов. */
+    @Query("DELETE FROM photos WHERE sourceId = :sourceId")
+    suspend fun deleteBySource(sourceId: String)
 
     @Query("SELECT COUNT(*) FROM photos WHERE enabled = 1 AND hidden = 0 AND takenAtExact = 1")
     suspend fun countExactDate(): Int

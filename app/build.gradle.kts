@@ -26,8 +26,8 @@ android {
         // которой не видели в работе, нечестно.
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "0.7.1"
+        versionCode = 13
+        versionName = "0.8.1"
     }
 
     signingConfigs {

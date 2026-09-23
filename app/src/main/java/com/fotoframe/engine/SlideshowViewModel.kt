@@ -110,7 +110,10 @@ data class MenuItem(
     val photoId: Long? = null,
     val openSettings: Boolean = false,
     /** Убрать файл из хранилища. Требует подтверждения — см. [ActionMenu.confirm]. */
-    val deleteId: Long? = null
+    val deleteId: Long? = null,
+    /** Повернуть снимок на [rotateBy] градусов. Меню при этом остаётся открытым. */
+    val rotateId: Long? = null,
+    val rotateBy: Int = 0
 )
 
 /**
@@ -146,7 +149,16 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     private var lastAdvanceAt = 0L
 
     /** Следующий кадр готовится, пока показывается текущий. */
-    private var prefetched: Slide? = null
+    /**
+     * Очередь готовых кадров. Готовый — значит ссылка получена, файл
+     * скачан, дата и лица разобраны; у ближайших [MEMORY_AHEAD] картинка
+     * ещё и раскодирована в память. Держать раскодированными все нельзя:
+     * на 4K это по 33 МБ на кадр. А скачанные лежат на диске и
+     * раскодируются за долю секунды — этого хватает, чтобы перемотка
+     * вперёд не упиралась в сеть.
+     */
+    private val queue = ArrayDeque<Slide>()
+    private var fillJob: Job? = null
 
     /** Ручное обновление уже идёт — повторное нажатие не запускает второе. */
     private var indexing = false
@@ -186,8 +198,18 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch {
+            var lastSources: Triple<String?, String, String>? = null
             application.settingsStore.settings.collect { s ->
                 _state.value = _state.value.copy(settings = s)
+
+                // Источник подключили или отключили — пересчитать допуск,
+                // чтобы его снимки сразу вошли в показ или вышли из него.
+                val sources = Triple(s.yandexToken, s.smbHost, s.smbShare)
+                if (lastSources != null && sources != lastSources) {
+                    tryOrNull { filter.apply(s) }
+                    clearQueue()
+                }
+                lastSources = sources
             }
         }
         viewModelScope.launch {
@@ -217,7 +239,11 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                     delay(500)
                     continue
                 }
-                val due = lastAdvanceAt + s.settings.intervalSeconds * 1000L
+                // Пока кадра на экране нет, пробуем чаще: ждать полный
+                // интервал перед пустым экраном незачем.
+                val interval = if (s.current == null) EMPTY_RETRY_MS
+                else s.settings.intervalSeconds * 1000L
+                val due = lastAdvanceAt + interval
                 val wait = due - System.currentTimeMillis()
                 if (wait > 0) {
                     delay(wait.coerceAtMost(1000))
@@ -239,6 +265,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     fun stop() {
         loop?.cancel()
         loop = null
+        fillJob?.cancel()
     }
 
     /**
@@ -319,7 +346,17 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             listOf(MenuItem("Удалить с хранилища", deleteId = slide.photo.id))
         }
-        val items = hide + remove + MenuItem("Настройки", openSettings = true) + MenuItem("Отмена")
+        // Поворот — для первого снимка кадра; у пары второй поворачивается
+        // из того же меню отдельными пунктами.
+        val rotate = listOf(
+            MenuItem("Повернуть по часовой", rotateId = slide.photo.id, rotateBy = 90),
+            MenuItem("Повернуть против часовой", rotateId = slide.photo.id, rotateBy = -90)
+        ) + if (second != null) {
+            listOf(MenuItem("Повернуть правый по часовой", rotateId = second.id, rotateBy = 90))
+        } else {
+            emptyList()
+        }
+        val items = hide + remove + rotate + MenuItem("Настройки", openSettings = true) + MenuItem("Отмена")
         _state.value = s.copy(menu = ActionMenu(items, selected = 0))
     }
 
@@ -378,6 +415,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         val item = m.items.getOrNull(m.selected) ?: return null
 
         when {
+            item.rotateId != null -> rotate(item.rotateId, item.rotateBy)
             item.photoId != null -> hide(item.photoId)
             item.deleteId != null && !m.confirm -> {
                 // Первый выбор — только спросить.
@@ -472,7 +510,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         history.clear()
         history.addAll(kept)
         historyPos = -1
-        if (prefetched?.contains(photoId) == true) prefetched = null
+        dropFromQueue(photoId)
 
         if (_state.value.current?.contains(photoId) == true) {
             _state.value = _state.value.copy(inHistory = false)
@@ -489,6 +527,28 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Повернуть снимок на [delta] градусов, навсегда. Обновляется и запись,
+     * и то, что на экране: кадр перерисовывается сразу, меню остаётся
+     * открытым — часто нужно два нажатия подряд.
+     */
+    fun rotate(photoId: Long, delta: Int) {
+        viewModelScope.launch {
+            val cur = _state.value.current ?: return@launch
+            val target = cur.photos.firstOrNull { it.id == photoId } ?: return@launch
+            val degrees = ((target.rotation + delta) % 360 + 360) % 360
+            dao.setRotation(photoId, degrees)
+
+            fun Slide.withRotation(): Slide = when (photoId) {
+                photo.id -> copy(photo = photo.copy(rotation = degrees))
+                second?.id -> copy(second = second?.copy(rotation = degrees))
+                else -> this
+            }
+            _state.value = _state.value.copy(current = cur.withRotation())
+            for (i in history.indices) history[i] = history[i].withRotation()
+        }
+    }
+
+    /**
      * Скрыть снимок из показа. Файл не трогается. Кадр, в котором он был,
      * уходит из истории, а если он на экране — сразу следующий.
      */
@@ -501,7 +561,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             history.addAll(kept)
             historyPos = -1
 
-            if (prefetched?.contains(photoId) == true) prefetched = null
+            dropFromQueue(photoId)
 
             val s = _state.value
             if (s.current?.contains(photoId) == true) {
@@ -510,6 +570,30 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 _state.value = s.copy(menu = null)
             }
+        }
+    }
+
+    /**
+     * Серия почти одинаковых кадров: та же папка, полторы минуты по времени
+     * съёмки, хэш ближе порога. Показан один — остальные в этом цикле
+     * пропускаются (без счётчика показов, чтобы не искажать статистику).
+     * Снимки без хэша не трогаются: он считается по мере дообработки.
+     */
+    private suspend fun skipSeriesOf(photo: Photo) {
+        val hash = photo.phash ?: return
+        val album = photo.albumName ?: return
+        val near = dao.neighboursInTime(
+            photo.id, album,
+            photo.takenAt - SERIES_WINDOW_MS,
+            photo.takenAt + SERIES_WINDOW_MS
+        )
+        val similar = near.filter { other ->
+            val h = other.phash
+            h != null && ImageSignals.hamming(hash, h) <= SERIES_MAX_DISTANCE
+        }
+        if (similar.isNotEmpty()) {
+            dao.skipInCycle(similar.map { it.id })
+            Log.i(TAG, "Серия: ${photo.displayName} + ещё ${similar.size} похожих, пропущены в этом цикле")
         }
     }
 
@@ -730,16 +814,41 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         // Кадр, подготовленный заранее. Если из-за гонки быстрых нажатий
         // он совпал с текущим — готовим другой.
-        var slide = prefetched?.takeIf { it.photo.id != currentId }
-        prefetched = null
+        // Кадр, который успел попасть в пару и уже показан, пропускаем:
+        // партнёр в пару берётся из ещё не показанных, а очередь этого
+        // не знает.
+        val recent = history.takeLast(6).flatMap { it.photos.map { p -> p.id } }.toSet()
+        var slide: Slide? = null
+        while (queue.isNotEmpty()) {
+            val head = queue.removeFirst()
+            val ids = head.photos.map { it.id }
+            if (head.photo.id != currentId && ids.none { it in recent }) { slide = head; break }
+        }
 
         if (slide == null) slide = buildSlideWithRetry(settings)
 
+        // Переход начинается только когда картинка уже в памяти: иначе
+        // анимация уходила в тёмное, а новый кадр появлялся, когда его
+        // успевали раскодировать. Для кадра из очереди это мгновенно —
+        // он уже прогрет; для собранного на месте — ждём, но недолго.
+        // Самый первый кадр не ждёт: перехода ещё нет, защищать нечего,
+        // а человек смотрит на пустой экран.
+        if (slide != null && currentId != null) warmToMemory(slide)
+
         if (slide == null) {
-            val msg = if (dao.countEnabled() > 0) {
-                "Не удалось получить снимок из источника. Проверьте сеть и хранилище."
-            } else {
-                "Нет проиндексированных фотографий. Откройте настройки и выберите источник."
+            // Причина — точная: «нет фотографий» пишется только когда их
+            // действительно нет. Отсеянные фильтром и отключённые источники
+            // — другая история, и человек должен понимать, куда смотреть.
+            val total = dao.countAll()
+            val enabled = dao.countEnabled()
+            val msg = when {
+                total == 0 ->
+                    "Нет проиндексированных фотографий. Откройте настройки и выберите источник."
+                enabled == 0 ->
+                    "В индексе $total снимков, но все отсеяны фильтром содержимого или " +
+                        "относятся к отключённым источникам. Проверьте настройки."
+                else ->
+                    "Не удалось получить снимок из источника. Проверьте сеть и хранилище."
             }
             _state.value = _state.value.copy(message = msg)
             return@withLock
@@ -750,6 +859,9 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // отсчитывалась бы не от того времени. У пары отмечаются оба снимка.
         val shownAt = System.currentTimeMillis()
         slide.photos.forEach { dao.markShown(it.id, shownAt) }
+        if (_state.value.settings.skipSimilar) {
+            slide.photos.forEach { skipSeriesOf(it) }
+        }
 
         history.addLast(slide)
         while (history.size > HISTORY_LIMIT) history.removeFirst()
@@ -768,10 +880,66 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         // Готовим следующий кадр заранее: к моменту смены и ссылка получена,
         // и сам файл уже лежит в кэше — сеть показ не задерживает.
-        viewModelScope.launch {
-            val next = buildSlide(_state.value.settings)
-            prefetched = next
-            next?.let { warmUp(it) }
+        ensureQueue()
+    }
+
+    /**
+     * Наполнение очереди в фоне, по одному кадру за раз. Второй запуск
+     * при уже идущем — ничего не делает.
+     */
+    private fun ensureQueue() {
+        if (fillJob?.isActive == true) return
+        fillJob = viewModelScope.launch {
+            while (queue.size < PREFETCH_DEPTH) {
+                // Наполнение постепенное. Первый запасной кадр нужен срочно —
+                // он и есть следующий показ. Остальные могут подождать:
+                // скачать и разобрать пять файлов подряд сразу после запуска
+                // значит занять сеть и процессор ровно в те секунды, когда
+                // идёт первый показ и первый наезд.
+                if (queue.isNotEmpty()) {
+                    delay(if (queue.size < MEMORY_AHEAD) FILL_GAP_SOON_MS else FILL_GAP_LATER_MS)
+                }
+
+                val settings = _state.value.settings
+                val busy = queue.flatMap { it.photos.map { p -> p.id } }.toSet() +
+                    listOfNotNull(_state.value.current?.photo?.id)
+                val slide = buildSlide(settings, exclude = busy) ?: break
+                queue.addLast(slide)
+                // Ближайшие — сразу в память, остальные лежат на диске.
+                if (queue.indexOf(slide) < MEMORY_AHEAD) warmToMemory(slide)
+            }
+        }
+    }
+
+    private fun clearQueue() {
+        fillJob?.cancel()
+        queue.clear()
+        if (loop?.isActive == true) ensureQueue()
+    }
+
+    private fun dropFromQueue(photoId: Long) {
+        queue.removeAll { it.contains(photoId) }
+    }
+
+    /**
+     * Раскодировать кадр в память в размере экрана и дождаться. Именно
+     * размер экрана: AsyncImage запросит его же и попадёт в кэш памяти,
+     * а не пойдёт раскодировать заново. Прежний прогрев без размера
+     * складывал в кэш оригинал на десятки мегабайт — он и не помещался
+     * толком, и вытеснял соседей.
+     */
+    private suspend fun warmToMemory(slide: Slide) {
+        val dm = application.resources.displayMetrics
+        val w = dm.widthPixels.coerceAtLeast(1)
+        val h = dm.heightPixels.coerceAtLeast(1)
+        withTimeoutOrNull(WARM_TIMEOUT_MS) {
+            listOfNotNull(slide.displayUrl, slide.secondUrl).forEach { url ->
+                tryOrNull {
+                    application.imageLoader.execute(
+                        ImageRequest.Builder(application).data(url).size(w, h).build()
+                    )
+                }
+            }
         }
     }
 
@@ -788,23 +956,21 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    /**
-     * Прогрев картинки: просим загрузчик скачать и разжать снимок заранее,
-     * без вывода на экран. К моменту смены кадра он уже в кэше.
-     */
-    private fun warmUp(slide: Slide) {
-        val urls = listOfNotNull(slide.displayUrl, slide.secondUrl)
-        urls.forEach { url ->
-            application.imageLoader.enqueue(
-                ImageRequest.Builder(application).data(url).build()
-            )
+    private suspend fun buildSlide(
+        settings: SlideshowSettings,
+        exclude: Set<Long> = emptySet()
+    ): Slide? {
+        // Выборка случайная и про очередь не знает: тот же снимок может
+        // выпасть дважды, пока первый ещё не показан. Несколько попыток
+        // это исправляют почти всегда.
+        var picked: Photo? = null
+        for (attempt in 0 until 6) {
+            val p = picker.next(settings) ?: return null
+            if (p.id !in exclude) { picked = p; break }
         }
-    }
-
-    private suspend fun buildSlide(settings: SlideshowSettings): Slide? {
-        val picked = picker.next(settings) ?: return null
-        val source = application.sources.byId(picked.sourceId) ?: return null
-        val url = tryOrNull { source.resolveDisplayUrl(picked) } ?: return null
+        val chosen = picked ?: picker.next(settings) ?: return null
+        val source = application.sources.byId(chosen.sourceId) ?: return null
+        val url = tryOrNull { source.resolveDisplayUrl(chosen) } ?: return null
 
         // Подписи для этого кадра считаются здесь же, а не ждут очереди
         // сплошного прохода: на архиве в десятки тысяч снимков очередь
@@ -813,8 +979,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // время на чтение заголовка есть; ограничение — чтобы медленное
         // хранилище не задержало смену.
         val photo = withTimeoutOrNull(ENRICH_TIMEOUT_MS) {
-            tryOrNull { enricher.enrichNow(picked, url) }
-        } ?: picked
+            tryOrNull { enricher.enrichNow(chosen, url) }
+        } ?: chosen
 
         if (!settings.pairPortraits) return Slide(photo, url)
 
@@ -885,6 +1051,17 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             ?: dao.leastRecentPortrait(photo.id)
             ?: return null
 
+        // Партнёр — не дубль первого кадра: два одинаковых снимка рядом
+        // выглядят как ошибка. Проверка дешёвая, но работает только когда
+        // у обоих посчитан хэш.
+        val h1 = photo.phash
+        val h2 = candidate.phash
+        if (h1 != null && h2 != null && ImageSignals.hamming(h1, h2) <= SERIES_MAX_DISTANCE) {
+            Log.i(TAG, "Пара: ${candidate.displayName} слишком похож на ${photo.displayName}, ищем другого")
+            dao.skipInCycle(listOf(candidate.id))
+            return null
+        }
+
         val source = application.sources.byId(candidate.sourceId) ?: return null
         val url = tryOrNull { source.resolveDisplayUrl(candidate) } ?: return null
 
@@ -893,6 +1070,42 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         } ?: candidate
 
         return enriched to url
+    }
+
+    /** Сколько записей от источника в индексе — для кнопки удаления. */
+    private val _sourceCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val sourceCounts: StateFlow<Map<String, Int>> = _sourceCounts.asStateFlow()
+
+    fun loadSourceCounts() {
+        viewModelScope.launch {
+            _sourceCounts.value = listOf("local", "yandex", "smb").associateWith { dao.countAllBySource(it) }
+        }
+    }
+
+    /**
+     * Убрать из индекса всё от источника. Для случая, когда источник
+     * отключён насовсем: держать его записи незачем, они только
+     * раздувают счётчики.
+     */
+    fun removeSourcePhotos(sourceId: String, onDone: (String) -> Unit) {
+        viewModelScope.launch {
+            val n = dao.countAllBySource(sourceId)
+            dao.deleteBySource(sourceId)
+
+            val kept = history.filterNot { it.photos.any { p -> p.sourceId == sourceId } }
+            history.clear()
+            history.addAll(kept)
+            historyPos = -1
+            clearQueue()
+
+            val cur = _state.value.current
+            if (cur != null && cur.photos.any { it.sourceId == sourceId }) {
+                _state.value = _state.value.copy(inHistory = false)
+                advance()
+            }
+            loadSourceCounts()
+            onDone("Удалено из индекса: $n")
+        }
     }
 
     /**
@@ -1202,6 +1415,30 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         /** Через сколько убрать сообщение об удалении. */
         private const val MESSAGE_MS = 6_000L
+
+        /** Повтор попытки, пока на экране пусто. */
+        private const val EMPTY_RETRY_MS = 5_000L
+
+        /** Сколько кадров держать готовыми впереди. */
+        private const val PREFETCH_DEPTH = 5
+
+        /** Сколько из них — раскодированными в памяти. */
+        private const val MEMORY_AHEAD = 2
+
+        /** Пауза перед вторым запасным кадром — он ещё близко. */
+        private const val FILL_GAP_SOON_MS = 3_000L
+
+        /** Пауза перед остальными — они понадобятся через минуту-две. */
+        private const val FILL_GAP_LATER_MS = 8_000L
+
+        /** Потолок ожидания раскодировки перед показом. */
+        private const val WARM_TIMEOUT_MS = 5_000L
+
+        /** Окно серии по времени съёмки — в обе стороны. */
+        private const val SERIES_WINDOW_MS = 90_000L
+
+        /** Хэши ближе этого — почти одинаковые кадры (из 64 бит). */
+        private const val SERIES_MAX_DISTANCE = 10
 
         /** Как часто спрашивать погоду. Сеть при этом трогается раз в полчаса. */
         private const val WEATHER_POLL_MS = 5L * 60 * 1000
