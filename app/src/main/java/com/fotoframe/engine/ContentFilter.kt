@@ -35,7 +35,11 @@ class ContentFilter(private val dao: PhotoDao) {
         val enable = ArrayList<Long>()
         val disable = ArrayList<Long>()
         for (r in rows) {
-            val ok = r.sourceId in active && allowed(r, s, minPixels, minBytes)
+            // Картины фильтр содержимого не касается: он про скриншоты,
+            // мелкие файлы и служебные папки — у музея таких нет, а размеров
+            // до первого показа неизвестно.
+            val museum = r.sourceId in com.fotoframe.source.MUSEUM_SOURCES
+            val ok = r.sourceId in active && (museum || allowed(r, s, minPixels, minBytes))
             if (ok) enable += r.id else disable += r.id
         }
 
@@ -48,9 +52,15 @@ class ContentFilter(private val dao: PhotoDao) {
 
     /** Какие источники настроены. Устройство считается настроенным всегда. */
     private fun activeSources(s: SlideshowSettings): Set<String> = buildSet {
-        add("local")
-        if (!s.yandexToken.isNullOrBlank()) add("yandex")
-        if (s.smbHost.isNotBlank() && s.smbShare.isNotBlank()) add("smb")
+        // Фотографии и картины — разные режимы, не смешиваются.
+        if (s.showMode == "art") {
+            if (s.artMet) add("met")
+            if (s.artCleveland) add("cleveland")
+        } else {
+            add("local")
+            if (!s.yandexToken.isNullOrBlank()) add("yandex")
+            if (s.smbHost.isNotBlank() && s.smbShare.isNotBlank()) add("smb")
+        }
     }
 
     private fun allowed(r: FilterRow, s: SlideshowSettings, minPixels: Long, minBytes: Long): Boolean {

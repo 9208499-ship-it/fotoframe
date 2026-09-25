@@ -21,7 +21,12 @@ import java.util.concurrent.TimeUnit
  * Единая точка, где собраны все источники.
  * Добавление нового облака сводится к одной строке в [all].
  */
-class SourceRegistry(context: Context, settings: SettingsStore) {
+class SourceRegistry(
+    context: Context,
+    settings: SettingsStore,
+    /** Индекс — музейным источникам, чтобы дописывать подписи картин. */
+    dao: () -> com.fotoframe.data.db.PhotoDao
+) {
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -86,8 +91,10 @@ class SourceRegistry(context: Context, settings: SettingsStore) {
     val local = LocalGallerySource(context)
     val yandex = YandexDiskSource(yandexApi, settings)
     val smb = SmbSource(context, settings)
+    val met = MetMuseumSource(context, http, dao)
+    val cleveland = ClevelandMuseumSource(context, http, dao)
 
-    val all: List<MediaSource> = listOf(local, yandex, smb)
+    val all: List<MediaSource> = listOf(local, yandex, smb, met, cleveland)
 
     fun byId(id: String): MediaSource? = all.firstOrNull { it.id == id }
 

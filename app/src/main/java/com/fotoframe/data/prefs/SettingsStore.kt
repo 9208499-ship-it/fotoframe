@@ -138,15 +138,69 @@ data class SlideshowSettings(
     val yandexWeatherKey: String = "",
 
     /**
-     * Как часто спрашивать Яндекс, в часах. У бесплатного тарифа 30
-     * запросов в сутки на ключ, и полчаса, как у бесплатных поставщиков,
-     * — это 48 на одно устройство. Раз в два часа — 12 на устройство:
-     * укладываются и два устройства на одном ключе.
+     * Как часто спрашивать Яндекс, в минутах, шаг 30: от 30 минут до
+     * 6 часов. У бесплатного тарифа 30 запросов в сутки на ключ; раз в
+     * 30 минут — это 48 с одного устройства, поэтому по умолчанию раз в
+     * два часа (12 на устройство — укладываются и два устройства на одном
+     * ключе). Короткий интервал оставлен для платных тарифов.
      */
-    val yandexRefreshHours: Int = 2,
+    val yandexRefreshMinutes: Int = 120,
 
     /** Дописывать город в строку погоды на экране. */
     val showWeatherCity: Boolean = false,
+
+    // ---------- Что показывать ----------
+
+    /**
+     * photos — свои фотографии (устройство, Диск, NAS); art — картины
+     * музеев. Не смешиваются: в режиме картин нет ни одной фотографии.
+     */
+    val showMode: String = "photos",
+
+    /** Музеи в режиме картин — перемешиваются между собой. */
+    val artMet: Boolean = true,
+    val artCleveland: Boolean = true,
+
+    /** Подпись картины: автор, название, год и музей. */
+    val showArtCaption: Boolean = true,
+
+    // ---------- Фон под снимком ----------
+
+    /**
+     * Насыщенность размытого фона, 0..1.5. 0 — чёрно-белый, 0.55 —
+     * приглушённый (по умолчанию), 1.0 — как снимок, 1.5 — сочнее снимка.
+     * Затемнение подстраивается само: чем насыщеннее, тем светлее.
+     */
+    val backdropSaturation: Float = 0.55f,
+
+    // ---------- Фоновая музыка ----------
+
+    /** off — выключена; device — музыка с устройства; smb — папка на NAS; stream — радио по адресу. */
+    val musicMode: String = "off",
+
+    /** Папка с музыкой на сетевом хранилище (внутри выбранной общей папки). */
+    val musicSmbFolder: String = "",
+
+    /**
+     * Папка с музыкой на устройстве — относительный путь из аудиобиблиотеки
+     * («Music/Jazz/»). Пусто — вся музыка.
+     */
+    val musicDeviceFolder: String = "",
+
+    /** Адрес потока интернет-радио. */
+    val musicStreamUrl: String = "",
+
+    /** Громкость, 0..100. */
+    val musicVolume: Int = 40,
+
+    /** Ветер в строке погоды: «· ветер 7 м/с». */
+    val showWind: Boolean = false,
+
+    /**
+     * Вторая строка погоды — осадки в ближайшие 12 часов: «дождь с 15:00».
+     * Появляется, только когда есть что сказать.
+     */
+    val showPrecipHint: Boolean = false,
 
     /**
      * Насколько сильно новые снимки вытесняют старые.
@@ -243,8 +297,22 @@ class SettingsStore(private val context: Context) {
         val weatherLon = floatPreferencesKey("weather_lon")
         val weatherPlace = stringPreferencesKey("weather_place")
         val yandexWeatherKey = stringPreferencesKey("yandex_weather_key")
-        val yandexRefreshHours = intPreferencesKey("yandex_refresh_hours")
+        /** Прежняя настройка в часах — читается, если новой ещё нет. */
+        val yandexRefreshHoursLegacy = intPreferencesKey("yandex_refresh_hours")
+        val yandexRefreshMinutes = intPreferencesKey("yandex_refresh_minutes")
         val showWeatherCity = booleanPreferencesKey("show_weather_city")
+        val showWind = booleanPreferencesKey("show_wind")
+        val backdropSaturation = floatPreferencesKey("backdrop_saturation")
+        val showMode = stringPreferencesKey("show_mode")
+        val artMet = booleanPreferencesKey("art_met")
+        val artCleveland = booleanPreferencesKey("art_cleveland")
+        val showArtCaption = booleanPreferencesKey("show_art_caption")
+        val musicMode = stringPreferencesKey("music_mode")
+        val musicSmbFolder = stringPreferencesKey("music_smb_folder")
+        val musicDeviceFolder = stringPreferencesKey("music_device_folder")
+        val musicStreamUrl = stringPreferencesKey("music_stream_url")
+        val musicVolume = intPreferencesKey("music_volume")
+        val showPrecipHint = booleanPreferencesKey("show_precip_hint")
         val recencyBias = floatPreferencesKey("recency_bias")
         val freshBoost = floatPreferencesKey("fresh_boost")
         val freshWindowDays = intPreferencesKey("fresh_window_days")
@@ -298,8 +366,22 @@ class SettingsStore(private val context: Context) {
             weatherLon = p[Keys.weatherLon] ?: defaults.weatherLon,
             weatherPlace = p[Keys.weatherPlace] ?: defaults.weatherPlace,
             yandexWeatherKey = p[Keys.yandexWeatherKey] ?: defaults.yandexWeatherKey,
-            yandexRefreshHours = p[Keys.yandexRefreshHours] ?: defaults.yandexRefreshHours,
+            yandexRefreshMinutes = p[Keys.yandexRefreshMinutes]
+                ?: p[Keys.yandexRefreshHoursLegacy]?.times(60)
+                ?: defaults.yandexRefreshMinutes,
             showWeatherCity = p[Keys.showWeatherCity] ?: defaults.showWeatherCity,
+            showWind = p[Keys.showWind] ?: defaults.showWind,
+            backdropSaturation = p[Keys.backdropSaturation] ?: defaults.backdropSaturation,
+            showMode = p[Keys.showMode] ?: defaults.showMode,
+            artMet = p[Keys.artMet] ?: defaults.artMet,
+            artCleveland = p[Keys.artCleveland] ?: defaults.artCleveland,
+            showArtCaption = p[Keys.showArtCaption] ?: defaults.showArtCaption,
+            musicMode = p[Keys.musicMode] ?: defaults.musicMode,
+            musicSmbFolder = p[Keys.musicSmbFolder] ?: defaults.musicSmbFolder,
+            musicDeviceFolder = p[Keys.musicDeviceFolder] ?: defaults.musicDeviceFolder,
+            musicStreamUrl = p[Keys.musicStreamUrl] ?: defaults.musicStreamUrl,
+            musicVolume = p[Keys.musicVolume] ?: defaults.musicVolume,
+            showPrecipHint = p[Keys.showPrecipHint] ?: defaults.showPrecipHint,
             recencyBias = p[Keys.recencyBias] ?: defaults.recencyBias,
             freshBoost = p[Keys.freshBoost] ?: defaults.freshBoost,
             freshWindowDays = p[Keys.freshWindowDays] ?: defaults.freshWindowDays,
@@ -343,8 +425,21 @@ class SettingsStore(private val context: Context) {
     suspend fun setShowWeather(v: Boolean) = edit { it[Keys.showWeather] = v }
 
     suspend fun setYandexWeatherKey(v: String) = edit { it[Keys.yandexWeatherKey] = v.trim() }
-    suspend fun setYandexRefreshHours(v: Int) = edit { it[Keys.yandexRefreshHours] = v.coerceIn(1, 6) }
+    suspend fun setYandexRefreshMinutes(v: Int) =
+        edit { it[Keys.yandexRefreshMinutes] = v.coerceIn(YANDEX_REFRESH_MIN, YANDEX_REFRESH_MAX) }
     suspend fun setShowWeatherCity(v: Boolean) = edit { it[Keys.showWeatherCity] = v }
+    suspend fun setShowWind(v: Boolean) = edit { it[Keys.showWind] = v }
+    suspend fun setBackdropSaturation(v: Float) = edit { it[Keys.backdropSaturation] = v.coerceIn(0f, 1.5f) }
+    suspend fun setShowMode(v: String) = edit { it[Keys.showMode] = v }
+    suspend fun setArtMet(v: Boolean) = edit { it[Keys.artMet] = v }
+    suspend fun setArtCleveland(v: Boolean) = edit { it[Keys.artCleveland] = v }
+    suspend fun setShowArtCaption(v: Boolean) = edit { it[Keys.showArtCaption] = v }
+    suspend fun setMusicMode(v: String) = edit { it[Keys.musicMode] = v }
+    suspend fun setMusicSmbFolder(v: String) = edit { it[Keys.musicSmbFolder] = v }
+    suspend fun setMusicDeviceFolder(v: String) = edit { it[Keys.musicDeviceFolder] = v }
+    suspend fun setMusicStreamUrl(v: String) = edit { it[Keys.musicStreamUrl] = v.trim() }
+    suspend fun setMusicVolume(v: Int) = edit { it[Keys.musicVolume] = v.coerceIn(0, 100) }
+    suspend fun setShowPrecipHint(v: Boolean) = edit { it[Keys.showPrecipHint] = v }
 
     suspend fun setWeatherPlace(name: String, lat: Float, lon: Float) = edit {
         it[Keys.weatherPlace] = name
@@ -405,3 +500,8 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit(block)
     }
 }
+
+/** Границы интервала опроса Яндекс Погоды, минуты. */
+const val YANDEX_REFRESH_MIN = 30
+const val YANDEX_REFRESH_MAX = 360
+const val YANDEX_REFRESH_STEP = 30

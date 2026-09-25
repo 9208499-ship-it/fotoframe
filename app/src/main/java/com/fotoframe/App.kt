@@ -57,7 +57,7 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         database = AppDatabase.get(this)
         settingsStore = SettingsStore(this)
-        sources = SourceRegistry(this, settingsStore)
+        sources = SourceRegistry(this, settingsStore) { database.photoDao() }
         IndexWorker.schedule(this)
         trackForeground()
         runOneTimeMigrations()

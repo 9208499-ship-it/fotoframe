@@ -54,6 +54,17 @@ class MainActivity : ComponentActivity() {
         if (id != null) vm.onDeleteConfirmed(id, result.resultCode == RESULT_OK)
     }
 
+    /**
+     * Отдельный запуск для аудио: общий обработчик после выдачи разрешения
+     * запускает полный обход источников, а здесь достаточно перезапустить
+     * музыку.
+     */
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) vm.restartMusic() else status = "Без доступа к аудио музыка с устройства не играет"
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
@@ -88,6 +99,8 @@ class MainActivity : ComponentActivity() {
                 val hidden by vm.hiddenPhotos.collectAsState()
                 val cities by vm.cities.collectAsState()
                 val sourceCounts by vm.sourceCounts.collectAsState()
+                val nowPlaying by vm.nowPlaying.collectAsState()
+                val musicFolders by vm.musicFolders.collectAsState()
 
                 // Запрос системного подтверждения приходит из ViewModel:
                 // там нет Activity, а показать диалог может только она.
@@ -135,11 +148,16 @@ class MainActivity : ComponentActivity() {
                                 return@FolderBrowser
                             }
                             lifecycleScope.launch {
-                                when (browseState.sourceId) {
-                                    "yandex" -> store.setYandexFolder(chosen)
-                                    "smb" -> store.setSmbFolder(chosen)
+                                if (browseState.purpose == "music") {
+                                    store.setMusicSmbFolder(chosen)
+                                    status = "Папка с музыкой выбрана."
+                                } else {
+                                    when (browseState.sourceId) {
+                                        "yandex" -> store.setYandexFolder(chosen)
+                                        "smb" -> store.setSmbFolder(chosen)
+                                    }
+                                    status = "Папка выбрана. Запустите обновление списка."
                                 }
-                                status = "Папка выбрана. Запустите обновление списка."
                             }
                             vm.closeBrowser()
                         },
@@ -172,6 +190,10 @@ class MainActivity : ComponentActivity() {
                         },
                         cities = cities,
                         onCitySearch = { vm.searchCity(it) },
+                        onDetectCity = {
+                            status = "Определяю город по сети…"
+                            vm.detectCity { report -> status = report }
+                        },
                         onYandexWeatherKeyChange = { key ->
                             lifecycleScope.launch {
                                 store.setYandexWeatherKey(key)
@@ -181,11 +203,50 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         weatherSource = state.weather?.source,
-                        onYandexRefreshChange = { h ->
-                            lifecycleScope.launch { store.setYandexRefreshHours(h) }
+                        onYandexRefreshChange = { m ->
+                            lifecycleScope.launch { store.setYandexRefreshMinutes(m) }
                         },
                         onShowWeatherCityChange = {
                             lifecycleScope.launch { store.setShowWeatherCity(it) }
+                        },
+                        onShowWindChange = {
+                            lifecycleScope.launch { store.setShowWind(it) }
+                        },
+                        onShowPrecipHintChange = {
+                            lifecycleScope.launch { store.setShowPrecipHint(it) }
+                        },
+                        onBackdropSaturationChange = {
+                            lifecycleScope.launch { store.setBackdropSaturation(it) }
+                        },
+                        onShowModeChange = { mode ->
+                            lifecycleScope.launch {
+                                store.setShowMode(mode)
+                                status = if (mode == "art") "Режим картин. Список музеев загрузится сам — это полминуты"
+                                else "Режим фотографий"
+                            }
+                        },
+                        onArtMetChange = { lifecycleScope.launch { store.setArtMet(it) } },
+                        onArtClevelandChange = { lifecycleScope.launch { store.setArtCleveland(it) } },
+                        onShowArtCaptionChange = { lifecycleScope.launch { store.setShowArtCaption(it) } },
+                        onMusicModeChange = { mode ->
+                            lifecycleScope.launch {
+                                store.setMusicMode(mode)
+                                if (mode == "device") requestAudioPermission()
+                            }
+                        },
+                        onMusicBrowse = { vm.openBrowser("smb", "Папка с музыкой", purpose = "music") },
+                        onMusicStreamUrlChange = { u ->
+                            lifecycleScope.launch {
+                                store.setMusicStreamUrl(u)
+                                status = "Адрес сохранён"
+                            }
+                        },
+                        onMusicVolumeChange = { lifecycleScope.launch { store.setMusicVolume(it) } },
+                        nowPlaying = nowPlaying,
+                        musicFolders = musicFolders,
+                        onMusicFoldersLoad = { vm.loadMusicFolders() },
+                        onMusicDeviceFolderChange = { f ->
+                            lifecycleScope.launch { store.setMusicDeviceFolder(f) }
                         },
                         onCityPick = { city ->
                             lifecycleScope.launch {
@@ -344,6 +405,18 @@ class MainActivity : ComponentActivity() {
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    /** Музыка с устройства читается из аудиобиблиотеки — на неё своё разрешение. */
+    private fun requestAudioPermission() {
+        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+            audioPermissionLauncher.launch(perm)
         }
     }
 
@@ -554,6 +627,21 @@ class MainActivity : ComponentActivity() {
             }
             else -> super.onKeyDown(keyCode, event)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        vm.resumeMusic()
+    }
+
+    /**
+     * «Домой» на пульте — приложение уходит в фон. Показ может идти дальше
+     * (его останавливает onDestroy), а музыка — нет: иначе она играла бы
+     * поверх телевизора и других приложений.
+     */
+    override fun onStop() {
+        vm.pauseMusic()
+        super.onStop()
     }
 
     override fun onDestroy() {

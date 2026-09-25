@@ -26,8 +26,8 @@ android {
         // которой не видели в работе, нечестно.
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.8.1"
+        versionCode = 14
+        versionName = "0.9"
     }
 
     signingConfigs {
@@ -111,6 +111,10 @@ dependencies {
 
     // Загрузка изображений
     implementation("io.coil-kt:coil-compose:2.6.0")
+
+    // Фоновая музыка и интернет-радио. Встроенный MediaPlayer теряет поток
+    // на мелких сетевых провалах; ExoPlayer переподключается и держит сеть.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
 
     // Сеть (Яндекс.Диск)
     implementation("com.squareup.retrofit2:retrofit:2.11.0")

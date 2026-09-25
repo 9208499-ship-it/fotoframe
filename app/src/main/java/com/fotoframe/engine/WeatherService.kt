@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Request
@@ -20,8 +21,19 @@ data class Weather(
     val description: String,
     val icon: String,
     /** Кто ответил — показывается в настройках, чтобы было видно, работает ли ключ. */
-    val source: String = ""
+    val source: String = "",
+    /** Скорость ветра, м/с; null — поставщик не сообщил. */
+    val windSpeed: Int? = null,
+    /**
+     * Почасовые осадки на ближайшие часы — из них подсказка вида «дождь
+     * с 15:00» считается в момент показа, чтобы она не устаревала, пока
+     * ответ поставщика лежит в кэше.
+     */
+    val hours: List<HourPrecip> = emptyList()
 ) {
+    /** «дождь с 15:00», «снег до 17:00» или null, если в ближайшие часы без перемен. */
+    fun precipHint(now: Long = System.currentTimeMillis()): String? = computePrecipHint(hours, now)
+
     /** Одной строкой: «☀ +18°, ясно». */
     val line: String get() = "$icon  ${if (temperature > 0) "+" else ""}$temperature°, $description"
 }
@@ -71,12 +83,12 @@ class WeatherService(private val sources: SourceRegistry) {
         lat: Double,
         lon: Double,
         yandexKey: String? = null,
-        yandexRefreshHours: Int = 2
+        yandexRefreshMinutes: Int = 120
     ): Weather? = lock.withLock {
         val now = System.currentTimeMillis()
         val place = lat to lon
         val key = yandexKey?.trim().orEmpty()
-        val yandexRefresh = yandexRefreshHours.coerceIn(1, 6) * 60L * 60 * 1000
+        val yandexRefresh = yandexRefreshMinutes.coerceIn(30, 360) * 60L * 1000
 
         // Сменили ключ — старый ответ не годится: иначе после ввода ключа
         // ещё полчаса показывался бы прежний поставщик.
@@ -181,19 +193,45 @@ class WeatherService(private val sources: SourceRegistry) {
     private fun yandexV2(lat: Double, lon: Double, key: String): Weather? {
         val url = "https://api.weather.yandex.ru/v2/forecast" +
             "?lat=${"%.4f".format(java.util.Locale.US, lat)}&lon=${"%.4f".format(java.util.Locale.US, lon)}" +
-            "&lang=ru_RU&limit=1&hours=false"
+            "&lang=ru_RU&limit=2&hours=true"
         val body = yandexHttp(Request.Builder().url(url), key) ?: return null
-        val fact = (Json.parseToJsonElement(body) as? JsonObject)?.get("fact") as? JsonObject ?: return null
-        val temp = (fact["temp"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
-        val condition = (fact["condition"] as? JsonPrimitive)?.content.orEmpty()
+        val root = Json.parseToJsonElement(body) as? JsonObject ?: return null
+        val fact = root["fact"] as? JsonObject ?: return null
+        val temp = fact.num("temp") ?: return null
+        val condition = fact.str("condition").orEmpty()
         val (desc, icon) = yandexCondition(condition)
-        return Weather(temp.roundToInt(), desc, icon, YANDEX)
+
+        // Почасовой прогноз: forecasts[день].hours[час], время — hour_ts в
+        // секундах. prec_type: 1 дождь, 2 дождь со снегом, 3 снег, 4 град.
+        val hours = ArrayList<HourPrecip>()
+        (root["forecasts"] as? JsonArray)?.forEach { day ->
+            ((day as? JsonObject)?.get("hours") as? JsonArray)?.forEach { h ->
+                val o = h as? JsonObject ?: return@forEach
+                val at = o.num("hour_ts")?.toLong()?.times(1000) ?: return@forEach
+                val mm = o.num("prec_mm") ?: 0.0
+                val type = o.num("prec_type")?.toInt() ?: 0
+                val kind = when {
+                    mm <= 0.0 && type == 0 -> null
+                    o.str("condition").orEmpty().contains("thunder") -> "гроза"
+                    type == 2 -> "мокрый снег"
+                    type == 3 -> "снег"
+                    type == 4 -> "град"
+                    else -> "дождь"
+                }
+                hours += HourPrecip(at, kind)
+            }
+        }
+        return Weather(
+            temp.roundToInt(), desc, icon, YANDEX,
+            windSpeed = fact.num("wind_speed")?.roundToInt(),
+            hours = hours
+        )
     }
 
     private fun yandexV3(lat: Double, lon: Double, key: String): Weather? {
-        fun ask(fields: String): JsonObject? {
+        fun ask(fields: String, forecast: String = ""): JsonObject? {
             val query = "{ weatherByPoint(request: { lat: ${"%.4f".format(java.util.Locale.US, lat)}, " +
-                "lon: ${"%.4f".format(java.util.Locale.US, lon)} }) { now { $fields } } }"
+                "lon: ${"%.4f".format(java.util.Locale.US, lon)} }) { now { $fields } $forecast } }"
             val payload = kotlinx.serialization.json.buildJsonObject {
                 put("query", JsonPrimitive(query))
             }.toString()
@@ -207,17 +245,52 @@ class WeatherService(private val sources: SourceRegistry) {
             if (root["errors"] != null) {
                 Log.w(TAG, "Яндекс Погода v3: ${root["errors"].toString().take(200)}")
             }
-            return ((root["data"] as? JsonObject)?.get("weatherByPoint") as? JsonObject)
-                ?.get("now") as? JsonObject
+            return (root["data"] as? JsonObject)?.get("weatherByPoint") as? JsonObject
         }
 
-        // Если тариф не отдаёт состояние, просим одну температуру.
-        val now = ask("temperature condition") ?: ask("temperature") ?: return null
-        val temp = (now["temperature"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
-        val condition = (now["condition"] as? JsonPrimitive)?.content.orEmpty()
+        // С подробностями, без них и совсем коротко — что тариф отдаст.
+        val point = ask(
+            "temperature condition windSpeed",
+            "forecast { hours(first: 13) { edges { node { timestamp prec precType } } } }"
+        ) ?: ask("temperature condition") ?: ask("temperature") ?: return null
+        val now = point["now"] as? JsonObject ?: return null
+        val temp = now.num("temperature") ?: return null
+        val condition = now.str("condition").orEmpty()
         val (desc, icon) = yandexCondition(condition)
-        return Weather(temp.roundToInt(), desc, icon, YANDEX)
+
+        val hours = ArrayList<HourPrecip>()
+        ((((point["forecast"] as? JsonObject)?.get("hours") as? JsonObject)?.get("edges")) as? JsonArray)
+            ?.forEach { e ->
+                val node = (e as? JsonObject)?.get("node") as? JsonObject ?: return@forEach
+                val at = parseTime(node.str("timestamp")) ?: return@forEach
+                val mm = node.num("prec") ?: 0.0
+                val type = node.str("precType").orEmpty().lowercase()
+                val kind = when {
+                    mm <= 0.0 -> null
+                    type.contains("sleet") -> "мокрый снег"
+                    type.contains("snow") -> "снег"
+                    type.contains("hail") -> "град"
+                    else -> "дождь"
+                }
+                hours += HourPrecip(at, kind)
+            }
+        return Weather(
+            temp.roundToInt(), desc, icon, YANDEX,
+            windSpeed = now.num("windSpeed")?.roundToInt(),
+            hours = hours
+        )
     }
+
+    /** Время в секундах, миллисекундах или ISO-строкой — что пришлёт поставщик. */
+    private fun parseTime(raw: String?): Long? {
+        if (raw.isNullOrBlank()) return null
+        raw.toLongOrNull()?.let { return if (it < 100_000_000_000L) it * 1000 else it }
+        return runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() }.getOrNull()
+    }
+
+    private fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.content
+    private fun JsonObject.num(k: String) = (this[k] as? JsonPrimitive)?.content?.toDoubleOrNull()
 
     /**
      * Состояние погоды Яндекса по ключевым словам. В v2 коды вида
@@ -277,13 +350,37 @@ class WeatherService(private val sources: SourceRegistry) {
     private fun openMeteo(lat: Double, lon: Double): Weather? {
         val body = get(
             "https://api.open-meteo.com/v1/forecast" +
-                "?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code"
+                "?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,wind_speed_10m" +
+                "&wind_speed_unit=ms&hourly=precipitation,weather_code&forecast_hours=13&timeformat=unixtime"
         ) ?: return null
-        val current = (Json.parseToJsonElement(body) as? JsonObject)?.get("current") as? JsonObject
-            ?: return null
-        val temp = (current["temperature_2m"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
-        val code = (current["weather_code"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
-        return Weather(temp.roundToInt(), describe(code), iconFor(code))
+        val root = Json.parseToJsonElement(body) as? JsonObject ?: return null
+        val current = root["current"] as? JsonObject ?: return null
+        val temp = current.num("temperature_2m") ?: return null
+        val code = current.num("weather_code")?.toInt() ?: 0
+
+        val hours = ArrayList<HourPrecip>()
+        (root["hourly"] as? JsonObject)?.let { h ->
+            val times = h["time"] as? JsonArray
+            val prec = h["precipitation"] as? JsonArray
+            val codes = h["weather_code"] as? JsonArray
+            if (times != null) for (i in times.indices) {
+                val at = (times[i] as? JsonPrimitive)?.content?.toLongOrNull()?.times(1000) ?: continue
+                val mm = (prec?.getOrNull(i) as? JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
+                val c = (codes?.getOrNull(i) as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+                val kind = when {
+                    mm < 0.1 -> null
+                    c in 95..99 -> "гроза"
+                    c in 71..77 || c in 85..86 -> "снег"
+                    else -> "дождь"
+                }
+                hours += HourPrecip(at, kind)
+            }
+        }
+        return Weather(
+            temp.roundToInt(), describe(code), iconFor(code),
+            windSpeed = current.num("wind_speed_10m")?.roundToInt(),
+            hours = hours
+        )
     }
 
     /**
@@ -318,7 +415,29 @@ class WeatherService(private val sources: SourceRegistry) {
             symbol == "clearsky" -> "ясно" to "☀"
             else -> "—" to "•"
         }
-        return Weather(temp.roundToInt(), desc, icon)
+
+        // Почасовой ряд: время ISO в UTC, осадки за следующий час.
+        val hours = ArrayList<HourPrecip>()
+        for (item in series.take(13)) {
+            val o = item as? JsonObject ?: continue
+            val at = parseTime(o.str("time")) ?: continue
+            val next = (o["data"] as? JsonObject)?.get("next_1_hours") as? JsonObject ?: continue
+            val mm = ((next["details"] as? JsonObject)?.num("precipitation_amount")) ?: 0.0
+            val sym = ((next["summary"] as? JsonObject)?.str("symbol_code")).orEmpty()
+            val kind = when {
+                mm < 0.1 -> null
+                sym.contains("thunder") -> "гроза"
+                sym.contains("sleet") -> "мокрый снег"
+                sym.contains("snow") -> "снег"
+                else -> "дождь"
+            }
+            hours += HourPrecip(at, kind)
+        }
+        return Weather(
+            temp.roundToInt(), desc, icon,
+            windSpeed = details.num("wind_speed")?.roundToInt(),
+            hours = hours
+        )
     }
 
     /**
@@ -419,3 +538,42 @@ class WeatherService(private val sources: SourceRegistry) {
         const val STALE_MS = 3L * 60 * 60 * 1000
     }
 }
+
+/** Час прогноза: время начала (мс) и вид осадков; null — без осадков. */
+data class HourPrecip(val at: Long, val kind: String?)
+
+/**
+ * Подсказка об осадках на [WINDOW_H] часов вперёд. Сейчас сухо — когда
+ * начнётся: «дождь с 15:00». Уже идёт — когда кончится: «дождь до 17:00».
+ * Если в окне ничего не меняется — null: строка появляется, только когда
+ * есть что сказать. Начало на завтра — «снег завтра с 06:00».
+ */
+internal fun computePrecipHint(hours: List<HourPrecip>, now: Long): String? {
+    val hour = 60L * 60 * 1000
+    val ahead = hours
+        .filter { it.at + hour > now && it.at < now + WINDOW_H * hour }
+        .sortedBy { it.at }
+    if (ahead.isEmpty()) return null
+
+    val first = ahead.first()
+    return if (first.kind != null) {
+        val stop = ahead.firstOrNull { it.kind == null } ?: return null
+        "${first.kind} ${whenText(stop.at, now, "до")}"
+    } else {
+        val start = ahead.firstOrNull { it.kind != null } ?: return null
+        "${start.kind} ${whenText(start.at, now, "с")}"
+    }
+}
+
+private fun whenText(at: Long, now: Long, prep: String): String {
+    val cal = java.util.Calendar.getInstance()
+    cal.timeInMillis = now
+    val today = cal.get(java.util.Calendar.DAY_OF_YEAR)
+    cal.timeInMillis = at
+    val day = cal.get(java.util.Calendar.DAY_OF_YEAR)
+    val time = "%02d:00".format(cal.get(java.util.Calendar.HOUR_OF_DAY))
+    return if (day != today) "завтра $prep $time" else "$prep $time"
+}
+
+/** Окно подсказки об осадках, часов. */
+private const val WINDOW_H = 12

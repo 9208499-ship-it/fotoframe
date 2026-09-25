@@ -213,6 +213,12 @@ class IndexWorker(
             if (current.smbHost.isNotBlank() && current.smbShare.isNotBlank()) {
                 results += "smb: " + indexer.index(app.sources.smb, current.smbFolder).describe()
             }
+
+            // Музеи обходятся только в режиме картин: вне его их списки не нужны.
+            if (current.showMode == "art") {
+                if (current.artMet) results += "met: " + indexer.index(app.sources.met, "*").describe()
+                if (current.artCleveland) results += "cleveland: " + indexer.index(app.sources.cleveland, "*").describe()
+            }
             Log.i(TAG, "Фоновое обновление: " + results.joinToString("; "))
 
             // Новые записи входят в индекс допущенными; фильтр надо применить,

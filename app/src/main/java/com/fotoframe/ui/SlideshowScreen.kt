@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fotoframe.engine.ActionMenu
@@ -157,6 +158,7 @@ fun SlideshowScreen(
                 portraitFitWhole = state.settings.portraitFitWhole,
                 intervalMillis = state.settings.intervalSeconds * 1000,
                 zoomStrength = state.settings.zoomStrength,
+                backdropSaturation = state.settings.backdropSaturation,
                 zoomPace = state.settings.zoomPace,
                 zoomWithoutFace = state.settings.zoomWithoutFace,
                 zoom = if (isCurrent) state.zoom else 1f,
@@ -211,10 +213,14 @@ fun SlideshowScreen(
 
 @Composable
 private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
+    // У пары подписи стоят в двух нижних углах; длинные имена картин с
+    // двух сторон сходились посередине и накладывались. Ширина ограничена
+    // половиной экрана, длинное переносится и обрезается.
+    val pair = state.current?.isPair == true
     val settings = state.settings
     if (!settings.showClock && !settings.showDate &&
         !settings.showPhotoDate && !settings.showLocation &&
-        !settings.showFileName && state.weather == null
+        !settings.showFileName && !settings.showArtCaption && state.weather == null
     ) return
 
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -229,7 +235,9 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
     }
 
     Column(
-        modifier = modifier.padding(40.dp),
+        modifier = modifier
+            .fillMaxWidth(if (pair) 0.46f else 0.75f)
+            .padding(40.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         if (settings.showClock) {
@@ -250,18 +258,32 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         // строке: без него место съёмки снимка, стоящее следом, читалось
         // как место погоды («+15°, облачно» и под ним «Южное»).
         state.weather?.let {
-            val city = settings.weatherPlace.takeIf { p -> settings.showWeatherCity && p.isNotBlank() }
-            Text(
-                text = if (city != null) "${it.line} · $city" else it.line,
-                fontSize = 22.sp,
-                alpha = 0.85f
-            )
+            val parts = buildList {
+                add(it.line)
+                if (settings.showWind) it.windSpeed?.let { w -> add("ветер $w м/с") }
+                if (settings.showWeatherCity && settings.weatherPlace.isNotBlank()) add(settings.weatherPlace)
+            }
+            Text(text = parts.joinToString(" · "), fontSize = 22.sp, alpha = 0.85f)
+
+            // Считается от текущего времени при каждой отрисовке строки
+            // часов — раз в минуту, так что «с 15:00» не устаревает, пока
+            // ответ поставщика лежит в кэше.
+            if (settings.showPrecipHint) {
+                it.precipHint(now)?.let { hint ->
+                    Text(text = hint, fontSize = 20.sp, alpha = 0.8f)
+                }
+            }
         }
         val photo = state.current?.photo
+        val isArt = photo != null && photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
         val hasPhotoCaption = photo != null && (
-            (settings.showPhotoDate && photo.takenAtExact) ||
-                (settings.showLocation && !photo.placeName.isNullOrBlank()) ||
-                settings.showFileName
+            if (isArt) {
+                settings.showArtCaption
+            } else {
+                (settings.showPhotoDate && photo.takenAtExact) ||
+                    (settings.showLocation && !photo.placeName.isNullOrBlank()) ||
+                    settings.showFileName
+            }
             )
         // Подписи снимка — отдельным блоком, с отступом от «сейчас».
         if (hasPhotoCaption &&
@@ -269,25 +291,40 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         ) {
             Spacer(Modifier.height(14.dp))
         }
-        // Только настоящая дата съёмки: у файлов с сетевой папки до разбора
-        // EXIF в takenAt лежит дата копирования, и её показывать не надо.
-        if (settings.showPhotoDate && photo != null && photo.takenAtExact) {
-            Text(
-                text = photoDateFormat.format(Date(photo.takenAt)),
-                fontSize = 18.sp,
-                alpha = 0.75f
-            )
+        if (isArt) {
+            // Картина: «Автор — Название, год» и музей. Подписи фото
+            // (дата съёмки, место, имя файла) к картинам не относятся.
+            if (settings.showArtCaption && photo != null) ArtCaption(photo)
+        } else {
+            // Только настоящая дата съёмки: у файлов с сетевой папки до разбора
+            // EXIF в takenAt лежит дата копирования, и её показывать не надо.
+            if (settings.showPhotoDate && photo != null && photo.takenAtExact) {
+                Text(
+                    text = photoDateFormat.format(Date(photo.takenAt)),
+                    fontSize = 18.sp,
+                    alpha = 0.75f
+                )
+            }
+            if (settings.showLocation && !photo?.placeName.isNullOrBlank()) {
+                Text(
+                    text = photo!!.placeName!!,
+                    fontSize = 18.sp,
+                    alpha = 0.75f
+                )
+            }
+            if (settings.showFileName && photo != null) {
+                Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
+            }
         }
-        if (settings.showLocation && !photo?.placeName.isNullOrBlank()) {
-            Text(
-                text = photo!!.placeName!!,
-                fontSize = 18.sp,
-                alpha = 0.75f
-            )
-        }
-        if (settings.showFileName && photo != null) {
-            Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
-        }
+    }
+}
+
+/** Подпись картины: первая строка — автор, название и год, вторая — музей. */
+@Composable
+private fun ArtCaption(photo: com.fotoframe.data.db.Photo) {
+    Text(text = photo.displayName, fontSize = 20.sp, alpha = 0.85f)
+    photo.albumName?.takeIf { it.isNotBlank() && it != photo.displayName }?.let {
+        Text(text = it, fontSize = 16.sp, alpha = 0.65f)
     }
 }
 
@@ -448,13 +485,17 @@ private fun SecondCaption(
     modifier: Modifier = Modifier
 ) {
     val settings = state.settings
-    val showDate = settings.showPhotoDate && photo.takenAtExact
-    val showPlace = settings.showLocation && !photo.placeName.isNullOrBlank()
-    val showName = settings.showFileName
-    if (!showDate && !showPlace && !showName) return
+    val isArt = photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
+    val showDate = !isArt && settings.showPhotoDate && photo.takenAtExact
+    val showPlace = !isArt && settings.showLocation && !photo.placeName.isNullOrBlank()
+    val showName = !isArt && settings.showFileName
+    val showArt = isArt && settings.showArtCaption
+    if (!showDate && !showPlace && !showName && !showArt) return
 
     Column(
-        modifier = modifier.padding(40.dp),
+        modifier = modifier
+            .fillMaxWidth(0.46f)
+            .padding(40.dp),
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -471,6 +512,7 @@ private fun SecondCaption(
         if (showName) {
             Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
         }
+        if (showArt) ArtCaption(photo)
     }
 }
 
@@ -488,13 +530,17 @@ private fun Text(
             fontSize = fontSize,
             fontWeight = weight,
             color = Color.Black.copy(alpha = 0.5f * alpha),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 2.dp, top = 2.dp)
         )
         androidx.compose.material3.Text(
             text = text,
             fontSize = fontSize,
             fontWeight = weight,
-            color = Color.White.copy(alpha = alpha)
+            color = Color.White.copy(alpha = alpha),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

@@ -53,6 +53,8 @@ data class BrowseState(
     val visible: Boolean = false,
     val sourceId: String = "",
     val title: String = "",
+    /** Для чего выбирают папку: "photos" (по умолчанию) или "music". */
+    val purpose: String = "photos",
     /** Текущий путь внутри источника. */
     val path: String = "",
     /** Путь, откуда пришли, — для кнопки «наверх». */
@@ -186,6 +188,12 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     private var weatherJob: Job? = null
 
     private val weatherService = WeatherService(application.sources)
+    private val _nowPlaying = MutableStateFlow<String?>(null)
+
+    /** Что сейчас играет — для подписи в настройках. */
+    val nowPlaying: StateFlow<String?> = _nowPlaying.asStateFlow()
+
+    private val music = MusicPlayer(application, application.sources, viewModelScope) { _nowPlaying.value = it }
 
     /** Найденные города для выбора в настройках. */
     private val _cities = MutableStateFlow<List<City>>(emptyList())
@@ -199,8 +207,24 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             var lastSources: Triple<String?, String, String>? = null
+            var lastComposition: Triple<Boolean, Boolean, Boolean>? = null
+            var lastArt: Triple<String, Boolean, Boolean>? = null
             application.settingsStore.settings.collect { s ->
                 _state.value = _state.value.copy(settings = s)
+
+                // Пары и отсев серий решаются при сборке кадра, а очередь
+                // держит собранные заранее: выключил пары — ещё пять
+                // кадров шли парами. Теперь очередь сбрасывается.
+                val composition = Triple(s.pairPortraits, s.pairByContent, s.skipSimilar)
+                if (lastComposition != null && composition != lastComposition) clearQueue()
+                lastComposition = composition
+
+                // Музыка следует за настройками. start сам решает, нужно ли
+                // что-то менять: тот же источник — продолжает играть, другой —
+                // перезапускается. Раньше музыка стартовала из start() показа
+                // до того, как настройки успевали прочитаться с диска, видела
+                // «выключено» — и больше не запускалась.
+                if (musicAllowed && loop?.isActive == true) music.start(s)
 
                 // Источник подключили или отключили — пересчитать допуск,
                 // чтобы его снимки сразу вошли в показ или вышли из него.
@@ -210,6 +234,19 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                     clearQueue()
                 }
                 lastSources = sources
+
+                // Сменили режим (фото ↔ картины) или набор музеев — пересчитать
+                // допуск и сбросить очередь, чтобы следующий же кадр был из
+                // нового режима. Музеи, которых ещё нет в индексе, подтянуть.
+                val art = Triple(s.showMode, s.artMet, s.artCleveland)
+                if (lastArt != null && art != lastArt) {
+                    tryOrNull { filter.apply(s) }
+                    clearQueue()
+                    if (s.showMode == "art") ensureMuseumsIndexed(s)
+                } else if (lastArt == null && s.showMode == "art") {
+                    ensureMuseumsIndexed(s)
+                }
+                lastArt = art
             }
         }
         viewModelScope.launch {
@@ -225,8 +262,18 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
      * а смена интервала в настройках действует сразу, а не со следующего
      * кадра.
      */
-    fun start() {
+    /** Можно ли играть музыку: в заставке — нет, ночью это был бы сюрприз. */
+    private var musicAllowed = true
+
+    /**
+     * Запуск показа. [withMusic] = false — для заставки. Музыка стартует,
+     * если настройки уже прочитаны; если нет — стартует сборщик настроек,
+     * как только они придут.
+     */
+    fun start(withMusic: Boolean = true) {
+        musicAllowed = withMusic
         startWeather()
+        if (withMusic) music.start(_state.value.settings) else music.stop()
         if (loop?.isActive == true) return
         loop = viewModelScope.launch {
             advance()
@@ -266,6 +313,35 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         loop?.cancel()
         loop = null
         fillJob?.cancel()
+        music.stop()
+    }
+
+    private val _musicFolders = MutableStateFlow<List<String>>(emptyList())
+    val musicFolders: StateFlow<List<String>> = _musicFolders.asStateFlow()
+
+    fun loadMusicFolders() {
+        viewModelScope.launch { _musicFolders.value = tryOrNull { music.deviceFolders() }.orEmpty() }
+    }
+
+    /** После выдачи разрешения на аудио — собрать список заново. */
+    fun restartMusic() {
+        if (musicAllowed && loop?.isActive == true) {
+            music.stop()
+            music.start(_state.value.settings)
+        }
+    }
+
+    /** Приложение ушло в фон (кнопка «Домой») — музыку выключить. */
+    fun pauseMusic() = music.stop()
+
+    /** Вернулись в приложение — музыку снова, если она включена. */
+    fun resumeMusic() {
+        if (musicAllowed && loop?.isActive == true) music.start(_state.value.settings)
+    }
+
+    override fun onCleared() {
+        music.stop()
+        super.onCleared()
     }
 
     /**
@@ -616,7 +692,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                     val w = tryOrNull {
                         weatherService.current(
                             s.weatherLat.toDouble(), s.weatherLon.toDouble(),
-                            s.yandexWeatherKey, s.yandexRefreshHours
+                            s.yandexWeatherKey, s.yandexRefreshMinutes
                         )
                     }
                     _state.value = _state.value.copy(weather = w)
@@ -646,6 +722,85 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _cities.value = tryOrNull { findCities(query) }.orEmpty()
         }
+    }
+
+    /**
+     * Город по внешнему IP-адресу подключения. На приставке нет GPS, а
+     * определение по Wi-Fi идёт через сервисы Google, которых на многих
+     * приставках нет. IP есть всегда, и для домашнего интернета город
+     * провайдера почти всегда совпадает с городом пользователя. Ошибается
+     * при VPN и у части мобильных операторов — поэтому город не
+     * сохраняется сам, а появляется в списке, и человек его подтверждает.
+     */
+    fun detectCity(onDone: (String) -> Unit) {
+        viewModelScope.launch {
+            val c = tryOrNull { cityByIp() }
+            if (c != null) {
+                _cities.value = listOf(c)
+                onDone("По сети определён город: ${c.name}. Проверьте регион и выберите его в списке")
+            } else {
+                onDone("Не удалось определить город по сети — найдите его поиском")
+            }
+        }
+    }
+
+    private suspend fun cityByIp(): City? = withContext(Dispatchers.IO) {
+        fun get(url: String): kotlinx.serialization.json.JsonObject? = try {
+            application.sources.httpClient()
+                .newCall(
+                    okhttp3.Request.Builder().url(url)
+                        .header("User-Agent", "FotoFrame/0.8 (Android TV photo frame)")
+                        .build()
+                )
+                .execute()
+                .use { r ->
+                    if (!r.isSuccessful) null
+                    else r.body?.string()?.let {
+                        kotlinx.serialization.json.Json.parseToJsonElement(it) as? kotlinx.serialization.json.JsonObject
+                    }
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "Город по сети: ${url.substringAfter("//").substringBefore('/')} — ${e.message}")
+            null
+        }
+
+        fun kotlinx.serialization.json.JsonObject.str(k: String) =
+            (this[k] as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+
+        // ipwho.is — отвечает по-русски.
+        get("https://ipwho.is/?lang=ru")?.let { o ->
+            if (o.str("success") == "true") {
+                val lat = o.str("latitude")?.toFloatOrNull()
+                val lon = o.str("longitude")?.toFloatOrNull()
+                val name = o.str("city")
+                if (lat != null && lon != null && name != null) {
+                    return@withContext City(
+                        name = name,
+                        region = listOfNotNull(o.str("region"), o.str("country")).joinToString(", "),
+                        lat = lat,
+                        lon = lon
+                    )
+                }
+            }
+        }
+
+        // ipapi.co — запасной, названия по-английски.
+        get("https://ipapi.co/json/")?.let { o ->
+            if (o.str("error") != "true") {
+                val lat = o.str("latitude")?.toFloatOrNull()
+                val lon = o.str("longitude")?.toFloatOrNull()
+                val name = o.str("city")
+                if (lat != null && lon != null && name != null) {
+                    return@withContext City(
+                        name = name,
+                        region = listOfNotNull(o.str("region"), o.str("country_name")).joinToString(", "),
+                        lat = lat,
+                        lon = lon
+                    )
+                }
+            }
+        }
+        null
     }
 
     /**
@@ -965,6 +1120,38 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         if (loop?.isActive == true) ensureQueue()
     }
 
+    /**
+     * Картина из музея узнаёт подпись при первом показе — при получении
+     * ссылки. Перечитываем запись, чтобы кадр ушёл на экран уже с ней.
+     */
+    private suspend fun afterResolve(p: Photo): Photo =
+        if (p.sourceId in com.fotoframe.source.MUSEUM_SOURCES) dao.photoById(p.id) ?: p else p
+
+    /** Музеи, выбранные в режиме картин, которых ещё нет в индексе. */
+    private fun ensureMuseumsIndexed(s: com.fotoframe.data.prefs.SlideshowSettings) {
+        viewModelScope.launch {
+            val needMet = s.artMet && dao.countAllBySource("met") == 0
+            val needCle = s.artCleveland && dao.countAllBySource("cleveland") == 0
+            if (!needMet && !needCle) return@launch
+            // Пока грузится список, на экране остаётся прежний кадр, а если
+            // его нет — «Готовлю первый кадр…». Потом сразу первая картина.
+            indexMuseums(s)
+            tryOrNull { filter.apply(application.settingsStore.settings.first()) }
+            clearQueue()
+            if (_state.value.current == null || _state.value.current?.photo?.sourceId !in com.fotoframe.source.MUSEUM_SOURCES) {
+                advance()
+            }
+        }
+    }
+
+    /** Обход выбранных музеев. Возвращает строку для отчёта. */
+    private suspend fun indexMuseums(s: com.fotoframe.data.prefs.SlideshowSettings, force: Boolean = false): String {
+        val parts = ArrayList<String>()
+        if (s.artMet) parts += "Метрополитен: " + indexer.index(application.sources.met, "*", force).describe()
+        if (s.artCleveland) parts += "Кливленд: " + indexer.index(application.sources.cleveland, "*", force).describe()
+        return parts.joinToString("\n")
+    }
+
     /** Снимки, которые уже на экране, в очереди или только что показаны. */
     private fun reservedIds(): Set<Long> {
         val ids = HashSet<Long>()
@@ -1035,9 +1222,10 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // Кадр готовится заранее, пока показывается предыдущий, так что
         // время на чтение заголовка есть; ограничение — чтобы медленное
         // хранилище не задержало смену.
+        val base = afterResolve(chosen)
         val photo = withTimeoutOrNull(ENRICH_TIMEOUT_MS) {
-            tryOrNull { enricher.enrichNow(chosen, url) }
-        } ?: chosen
+            tryOrNull { enricher.enrichNow(base, url) }
+        } ?: base
 
         if (!settings.pairPortraits) return Slide(photo, url)
 
@@ -1137,9 +1325,10 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         val source = application.sources.byId(candidate.sourceId) ?: return null
         val url = tryOrNull { source.resolveDisplayUrl(candidate) } ?: return null
 
+        val partnerBase = afterResolve(candidate)
         val enriched = withTimeoutOrNull(ENRICH_TIMEOUT_MS) {
-            tryOrNull { enricher.enrichNow(candidate, url) }
-        } ?: candidate
+            tryOrNull { enricher.enrichNow(partnerBase, url) }
+        } ?: partnerBase
 
         return enriched to url
     }
@@ -1150,7 +1339,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadSourceCounts() {
         viewModelScope.launch {
-            _sourceCounts.value = listOf("local", "yandex", "smb").associateWith { dao.countAllBySource(it) }
+            _sourceCounts.value = listOf("local", "yandex", "smb", "met", "cleveland")
+                .associateWith { dao.countAllBySource(it) }
         }
     }
 
@@ -1199,17 +1389,19 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
      * Открывает обзор для источника. Корень у каждого свой: у сетевой папки
      * это верх шары, у Яндекс.Диска — disk:/.
      */
-    fun openBrowser(sourceId: String, title: String) {
+    fun openBrowser(sourceId: String, title: String, purpose: String = "photos") {
         val root = when (sourceId) {
             "yandex" -> "disk:/"
-            // Сетевая папка начинается со списка общих папок хранилища.
-            "smb" -> SHARES_ROOT
+            // Сетевая папка начинается со списка общих папок хранилища —
+            // кроме папки с музыкой: она внутри уже выбранной общей папки.
+            "smb" -> if (purpose == "music") "" else SHARES_ROOT
             else -> ""
         }
         _browse.value = BrowseState(
             visible = true,
             sourceId = sourceId,
             title = title,
+            purpose = purpose,
             path = root,
             stack = emptyList(),
             loading = true
@@ -1362,6 +1554,16 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             val report = StringBuilder()
             try {
                 val settings = application.settingsStore.settings.first()
+
+                // В режиме картин «обновить список» — это про музеи.
+                if (settings.showMode == "art") {
+                    report.append(indexMuseums(settings, force))
+                    val f = filter.apply(settings)
+                    report.append("\nК показу допущено ${f.enabled}")
+                    onDone(report.toString().trim())
+                    clearQueue()
+                    return@launch
+                }
 
                 report.append("Устройство: ${indexer.index(application.sources.local, "*", force).describe()}")
 

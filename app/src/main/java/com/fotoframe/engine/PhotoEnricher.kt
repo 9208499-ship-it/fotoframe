@@ -378,8 +378,16 @@ class PhotoEnricher(
     }
 
     /** Источник снимка сейчас недоступен целиком (не отдельный файл). */
+    /**
+     * Источник сейчас не может отдать файл фоновому проходу. Для сетевой
+     * папки — когда она лежит. Картины музеев фоновые проходы не трогают
+     * вовсе: у них нет локального файла, скачивается картина только перед
+     * показом, и там же разбираются размеры и лица. Без этого фон
+     * расходовал бы попытки впустую, и к показу их бы не осталось.
+     */
     private fun sourceDown(photo: Photo): Boolean =
-        photo.sourceId == "smb" && sources.smb.isDown()
+        (photo.sourceId == "smb" && sources.smb.isDown()) ||
+            photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
 
     private fun isHeif(name: String): Boolean {
         val lower = name.lowercase()

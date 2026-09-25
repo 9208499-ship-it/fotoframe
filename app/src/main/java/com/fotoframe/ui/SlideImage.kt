@@ -109,6 +109,8 @@ fun SlideImage(
     panY: Float = 0f,
     onLoadError: () -> Unit = {},
     onLoadSuccess: () -> Unit = {},
+    /** Насыщенность размытого фона, 0..1.5. */
+    backdropSaturation: Float = 0.55f,
     modifier: Modifier = Modifier
 ) {
     // Плавно: скачок масштаба на большом экране режет глаз.
@@ -117,7 +119,7 @@ fun SlideImage(
     val panYAnim by animateFloatAsState(panY, tween(200), label = "panY")
 
     if (slide.isPair) {
-        PairOfPortraits(slide, fitMode, zoomAnim, panXAnim, panYAnim, onLoadError, onLoadSuccess, modifier)
+        PairOfPortraits(slide, fitMode, zoomAnim, panXAnim, panYAnim, onLoadError, onLoadSuccess, backdropSaturation, modifier)
         return
     }
 
@@ -137,6 +139,7 @@ fun SlideImage(
         panY = panYAnim,
         onLoadError = onLoadError,
         onLoadSuccess = onLoadSuccess,
+        backdropSaturation = backdropSaturation,
         modifier = modifier
     )
 }
@@ -176,6 +179,7 @@ private fun PairOfPortraits(
     panY: Float,
     onLoadError: () -> Unit,
     onLoadSuccess: () -> Unit,
+    backdropSaturation: Float = 0.55f,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -189,10 +193,10 @@ private fun PairOfPortraits(
         // продолжением: каждая половина берёт фон от своего снимка.
         if (fitMode != FitMode.FIT_BLACK) {
             Row(Modifier.fillMaxSize()) {
-                BlurredBackdrop(slide.displayUrl, Modifier.weight(1f).fillMaxHeight())
-                BlurredBackdrop(slide.secondUrl.orEmpty(), Modifier.weight(1f).fillMaxHeight())
+                BlurredBackdrop(slide.displayUrl, Modifier.weight(1f).fillMaxHeight(), backdropSaturation)
+                BlurredBackdrop(slide.secondUrl.orEmpty(), Modifier.weight(1f).fillMaxHeight(), backdropSaturation)
             }
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = BACKDROP_DIM)))
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = backdropDim(backdropSaturation))))
         }
 
         val boxW = constraints.maxWidth.toFloat()
@@ -283,7 +287,7 @@ private fun PairOfPortraits(
  * подложкой, а не второй картинкой — особенно когда на снимке люди.
  */
 @Composable
-private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier) {
+private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier, saturation: Float = 0.55f) {
     val context = LocalContext.current
     val blurred = modifier.let {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) it.blur(32.dp) else it
@@ -297,7 +301,7 @@ private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier) {
             .build(),
         contentDescription = null,
         contentScale = ContentScale.Crop,
-        colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0.55f) }),
+        colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(saturation.coerceIn(0f, 1.5f)) }),
         modifier = blurred
     )
 }
@@ -305,8 +309,12 @@ private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier) {
 /** Размер крошечной копии для подложки: меньше — мыльнее. */
 private const val BACKDROP_PX = 20
 
-/** Затемнение подложки. */
-private const val BACKDROP_DIM = 0.55f
+/**
+ * Затемнение подложки при заданной насыщенности: приглушённый фон
+ * темнее, сочный — светлее, иначе насыщенность под тёмной плёнкой не
+ * видна. 0.55 → 0.49, 1.0 → 0.40, 1.5 → 0.30.
+ */
+private fun backdropDim(saturation: Float): Float = (0.60f - saturation * 0.20f).coerceIn(0.30f, 0.60f)
 
 /** Снимок точно в заданном прямоугольнике — он уже посчитан по пропорциям. */
 @Composable
@@ -388,6 +396,7 @@ private fun SinglePhoto(
     panY: Float,
     onLoadError: () -> Unit,
     onLoadSuccess: () -> Unit,
+    backdropSaturation: Float = 0.55f,
     modifier: Modifier = Modifier
 ) {
     // Ручной поворот на 90/270 — вокруг прямого показа с переставленными
@@ -411,6 +420,7 @@ private fun SinglePhoto(
         panY = panY,
         onLoadError = onLoadError,
         onLoadSuccess = onLoadSuccess,
+        backdropSaturation = backdropSaturation,
         modifier = modifier)
         return
     }
@@ -440,6 +450,7 @@ private fun SinglePhoto(
         panY = panY,
         onLoadError = onLoadError,
         onLoadSuccess = onLoadSuccess,
+        backdropSaturation = backdropSaturation,
         modifier = Modifier)
         }
     }
@@ -462,6 +473,7 @@ private fun SinglePhotoUpright(
     panY: Float,
     onLoadError: () -> Unit,
     onLoadSuccess: () -> Unit,
+    backdropSaturation: Float = 0.55f,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -505,10 +517,10 @@ private fun SinglePhotoUpright(
             // версии Android. Modifier.blur добавляет гладкости, но до
             // Android 12 он ничего не делает, поэтому опираться только
             // на него нельзя.
-            BlurredBackdrop(url, Modifier.fillMaxSize())
+            BlurredBackdrop(url, Modifier.fillMaxSize(), backdropSaturation)
             // Затемнение отдельным слоем поверх фона: background в цепочке
             // модификаторов картинки рисуется под ней и не виден.
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = BACKDROP_DIM)))
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = backdropDim(backdropSaturation))))
         }
 
         val manual = zoom > 1.001f

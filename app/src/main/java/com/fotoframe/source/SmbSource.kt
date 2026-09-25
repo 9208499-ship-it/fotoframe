@@ -569,6 +569,81 @@ class SmbSource(
      * Файл целиком в память, минуя кэш показа. Нужен детектору лиц:
      * ему хватает одного прочтения, а место в кэше дороже.
      */
+    /**
+     * Аудиофайлы в папке и её подпапках — для фоновой музыки. Список
+     * ограничен: тысячи треков перемешивать незачем, а перечисление
+     * большого дерева на NAS небыстрое.
+     */
+    suspend fun listAudio(folder: String, limit: Int = 2000): List<String> =
+        withContext(Dispatchers.IO) {
+            val disk = share() ?: return@withContext emptyList()
+            val out = ArrayList<String>()
+            val queue = ArrayDeque<String>()
+            queue += folder.trim('/', '\\')
+            acquire()
+            try {
+                while (queue.isNotEmpty() && out.size < limit) {
+                    val dir = queue.removeFirst()
+                    val entries = try {
+                        disk.list(dir)
+                    } catch (e: Throwable) {
+                        e.rethrowIfCancelled()
+                        Log.w(TAG, "Музыка: не удалось прочитать папку '$dir': ${e.message}")
+                        continue
+                    }
+                    for (entry in entries) {
+                        val name = entry.fileName
+                        if (name == "." || name == "..") continue
+                        val full = joinPath(dir, name)
+                        if (entry.isDirectory()) {
+                            queue += full
+                        } else if (name.substringAfterLast('.', "").lowercase() in AUDIO_EXT) {
+                            out += full
+                        }
+                    }
+                }
+            } finally {
+                release()
+            }
+            out
+        }
+
+    /**
+     * Скачать файл в кэш и вернуть его. Тот же кэш, что у снимков: файл
+     * с тем же путём второй раз не качается.
+     */
+    suspend fun fetchToCache(path: String): File? = withContext(Dispatchers.IO) {
+        val cached = File(cacheDir, cacheName(path))
+        if (cached.length() > 0) {
+            cached.setLastModified(System.currentTimeMillis())
+            return@withContext cached
+        }
+        val disk = share() ?: return@withContext null
+        val tmp = File.createTempFile("dl_", ".part", cacheDir)
+        acquire()
+        try {
+            openForRead(disk, path).use { remote ->
+                remote.inputStream.use { input ->
+                    tmp.outputStream().use { output -> input.copyTo(output, DEFAULT_BUFFER) }
+                }
+            }
+            if (!tmp.renameTo(cached)) {
+                tmp.copyTo(cached, overwrite = true)
+                tmp.delete()
+            }
+            prune()
+            cached
+        } catch (e: Throwable) {
+            e.rethrowIfCancelled()
+            tmp.delete()
+            noteFailure(e)
+            Log.w(TAG, "Не удалось скачать '$path': ${e.message}")
+            null
+        } finally {
+            release()
+        }
+    }
+
     suspend fun readFile(path: String): ByteArray? =
         withContext(Dispatchers.IO) {
             val disk = share() ?: return@withContext null
@@ -629,6 +704,9 @@ class SmbSource(
     }
 
     companion object {
+        /** Расширения аудио для фоновой музыки. */
+        private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "ogg", "wav", "opus")
+
         /** Корзина рамки в корне шары. Видна с компьютера, файл можно вернуть. */
         const val TRASH_DIR = "_Корзина фоторамки"
 

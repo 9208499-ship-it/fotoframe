@@ -44,6 +44,9 @@ import com.fotoframe.data.db.Photo
 import kotlinx.coroutines.delay
 import com.fotoframe.engine.City
 import com.fotoframe.data.prefs.FitMode
+import com.fotoframe.data.prefs.YANDEX_REFRESH_STEP
+import com.fotoframe.data.prefs.YANDEX_REFRESH_MAX
+import com.fotoframe.data.prefs.YANDEX_REFRESH_MIN
 import com.fotoframe.data.prefs.PhotoOrder
 import com.fotoframe.data.prefs.SlideshowSettings
 import com.fotoframe.data.prefs.Transition
@@ -81,9 +84,25 @@ fun SettingsScreen(
     cities: List<City> = emptyList(),
     onCitySearch: (String) -> Unit = {},
     onCityPick: (City) -> Unit = {},
+    onDetectCity: () -> Unit = {},
     onYandexWeatherKeyChange: (String) -> Unit = {},
     onYandexRefreshChange: (Int) -> Unit = {},
     onShowWeatherCityChange: (Boolean) -> Unit = {},
+    onShowWindChange: (Boolean) -> Unit = {},
+    onShowPrecipHintChange: (Boolean) -> Unit = {},
+    onBackdropSaturationChange: (Float) -> Unit = {},
+    onShowModeChange: (String) -> Unit = {},
+    onArtMetChange: (Boolean) -> Unit = {},
+    onArtClevelandChange: (Boolean) -> Unit = {},
+    onShowArtCaptionChange: (Boolean) -> Unit = {},
+    onMusicModeChange: (String) -> Unit = {},
+    onMusicBrowse: () -> Unit = {},
+    onMusicStreamUrlChange: (String) -> Unit = {},
+    onMusicVolumeChange: (Int) -> Unit = {},
+    nowPlaying: String? = null,
+    musicFolders: List<String> = emptyList(),
+    onMusicFoldersLoad: () -> Unit = {},
+    onMusicDeviceFolderChange: (String) -> Unit = {},
     /** Кто сейчас отдаёт погоду — для проверки ключа. */
     weatherSource: String? = null,
     onPortraitFitWholeChange: (Boolean) -> Unit,
@@ -164,6 +183,17 @@ fun SettingsScreen(
         }
 
         // ======== Простой набор — всегда виден ========
+
+        item {
+            ShowModeCard(
+                settings = settings,
+                counts = sourceCounts,
+                onMode = onShowModeChange,
+                onMet = onArtMetChange,
+                onCleveland = onArtClevelandChange,
+                onCaption = onShowArtCaptionChange
+            )
+        }
 
         item { SectionTitle("Показ") }
 
@@ -250,6 +280,38 @@ fun SettingsScreen(
         }
 
         item {
+            val b = settings.backdropSaturation
+            StepperRow(
+                title = "Насыщенность размытого фона",
+                caption = when {
+                    b <= 0.01f -> "Чёрно-белый фон"
+                    b < 0.5f -> "Приглушённый, почти серый"
+                    b < 0.9f -> "Приглушённый — не спорит со снимком"
+                    b < 1.2f -> "Как на снимке"
+                    else -> "Сочнее снимка, как в Fotoo"
+                } + ". Затемнение подстраивается само: чем насыщеннее, тем светлее. " +
+                    "Действует в режиме «целиком, размытый фон» и у пар",
+                value = "${(b * 100).toInt()}%",
+                onPrev = { onBackdropSaturationChange((b - 0.25f).coerceAtLeast(0f)) },
+                onNext = { onBackdropSaturationChange((b + 0.25f).coerceAtMost(1.5f)) }
+            )
+        }
+
+        item {
+            MusicCard(
+                settings = settings,
+                nowPlaying = nowPlaying,
+                onMode = onMusicModeChange,
+                onBrowse = onMusicBrowse,
+                onUrl = onMusicStreamUrlChange,
+                onVolume = onMusicVolumeChange,
+                folders = musicFolders,
+                onLoadFolders = onMusicFoldersLoad,
+                onDeviceFolder = onMusicDeviceFolderChange
+            )
+        }
+
+        item {
             val z = settings.zoomStrength
             StepperRow(
                 title = "Сила наезда",
@@ -272,9 +334,12 @@ fun SettingsScreen(
                 onShowWeatherChange = onShowWeatherChange,
                 onSearch = onCitySearch,
                 onPick = onCityPick,
+                onDetect = onDetectCity,
                 onYandexKey = onYandexWeatherKeyChange,
                 onYandexRefresh = onYandexRefreshChange,
                 onShowCity = onShowWeatherCityChange,
+                onShowWind = onShowWindChange,
+                onShowPrecipHint = onShowPrecipHintChange,
                 source = weatherSource
             )
         }
@@ -759,9 +824,12 @@ private fun WeatherCard(
     onShowWeatherChange: (Boolean) -> Unit,
     onSearch: (String) -> Unit,
     onPick: (City) -> Unit,
+    onDetect: () -> Unit = {},
     onYandexKey: (String) -> Unit = {},
     onYandexRefresh: (Int) -> Unit = {},
     onShowCity: (Boolean) -> Unit = {},
+    onShowWind: (Boolean) -> Unit = {},
+    onShowPrecipHint: (Boolean) -> Unit = {},
     source: String? = null
 ) {
     var query by remember { mutableStateOf("") }
@@ -800,6 +868,7 @@ private fun WeatherCard(
                         LabeledField("Город", "Санкт-Петербург", query) { query = it }
                     }
                     Button(onClick = { onSearch(query) }) { Text("Найти") }
+                    Button(onClick = onDetect) { Text("Определить по сети") }
                 }
 
                 cities.forEach { city ->
@@ -825,6 +894,17 @@ private fun WeatherCard(
                 }
 
                 SwitchRow(
+                    "Ветер",
+                    "«☁ +10°, пасмурно · ветер 7 м/с»",
+                    settings.showWind, onShowWind
+                )
+                SwitchRow(
+                    "Осадки в ближайшие часы",
+                    "Второй строкой: «дождь с 15:00», «снег до 17:00». Появляется, только если " +
+                        "в ближайшие 12 часов что-то начнётся или закончится",
+                    settings.showPrecipHint, onShowPrecipHint
+                )
+                SwitchRow(
                     "Город в строке погоды",
                     "«☁ +12°, пасмурно · Санкт-Петербург». Удобно при настройке — сразу видно, " +
                         "для какого города погода",
@@ -848,17 +928,29 @@ private fun WeatherCard(
                 }
 
                 if (settings.yandexWeatherKey.isNotBlank()) {
-                    val h = settings.yandexRefreshHours
-                    val perDay = 24 / h
+                    val m = settings.yandexRefreshMinutes
+                    val perDay = 24 * 60 / m
+                    // Предупреждение вместо запрета: у платных тарифов лимит
+                    // другой, и короткий интервал там уместен.
+                    val overLimit = perDay > 30
                     StepperRow(
                         title = "Как часто спрашивать Яндекс",
-                        caption = "Около $perDay запросов в сутки с этого устройства. У бесплатного " +
-                            "тарифа 30 в сутки на ключ — если ключ стоит на нескольких устройствах, " +
-                            "их запросы складываются. Между обновлениями показывается последний " +
-                            "ответ Яндекса",
-                        value = "раз в $h ч",
-                        onPrev = { onYandexRefresh((h - 1).coerceAtLeast(1)) },
-                        onNext = { onYandexRefresh((h + 1).coerceAtMost(6)) }
+                        caption = "Около $perDay запросов в сутки с этого устройства. " +
+                            (if (overLimit) {
+                                "Это больше 30 — лимита бесплатного тарифа: после него Яндекс " +
+                                    "начнёт отказывать, и погода будет от бесплатных поставщиков. "
+                            } else {
+                                "У бесплатного тарифа 30 в сутки на ключ; если ключ стоит на " +
+                                    "нескольких устройствах, их запросы складываются. "
+                            }) +
+                            "Между обновлениями показывается последний ответ Яндекса",
+                        value = "раз в ${refreshText(m)}",
+                        onPrev = {
+                            onYandexRefresh((m - YANDEX_REFRESH_STEP).coerceAtLeast(YANDEX_REFRESH_MIN))
+                        },
+                        onNext = {
+                            onYandexRefresh((m + YANDEX_REFRESH_STEP).coerceAtMost(YANDEX_REFRESH_MAX))
+                        }
                     )
                 }
 
@@ -871,6 +963,218 @@ private fun WeatherCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * Что показывать: свои фотографии или картины музеев. Режимы не
+ * смешиваются; картины выбранных музеев перемешиваются между собой.
+ */
+@Composable
+private fun ShowModeCard(
+    settings: SlideshowSettings,
+    counts: Map<String, Int>,
+    onMode: (String) -> Unit,
+    onMet: (Boolean) -> Unit,
+    onCleveland: (Boolean) -> Unit,
+    onCaption: (Boolean) -> Unit
+) {
+    RowCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Что показывать", color = Color.White, fontSize = 20.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ModeTab("Мои фотографии", settings.showMode != "art") { onMode("photos") }
+                ModeTab("Картины музеев", settings.showMode == "art") { onMode("art") }
+            }
+
+            if (settings.showMode == "art") {
+                Text(
+                    "Картины в общественном достоянии из открытых собраний музеев — свободны для " +
+                        "показа. Картины выбранных музеев идут вперемешку; ваши фотографии в этом " +
+                        "режиме не показываются. Картина скачивается перед показом, нужен интернет.",
+                    color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                )
+                fun countText(id: String) = (counts[id] ?: 0).let { if (it > 0) " · в списке $it" else "" }
+                SwitchRow(
+                    "Метрополитен-музей, Нью-Йорк",
+                    "Европейская живопись — около 2,7 тысячи картин" + countText("met"),
+                    settings.artMet, onMet
+                )
+                SwitchRow(
+                    "Кливлендский музей искусств",
+                    "Живопись в открытом доступе" + countText("cleveland"),
+                    settings.artCleveland, onCleveland
+                )
+                SwitchRow(
+                    "Подпись картины",
+                    "Автор, название, год и музей. Названия — на языке музея, обычно английском",
+                    settings.showArtCaption, onCaption
+                )
+                if (!settings.artMet && !settings.artCleveland) {
+                    Text(
+                        "Не выбран ни один музей — показывать нечего.",
+                        color = Color(0xFFFF8A80), fontSize = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Фоновая музыка: с устройства, из папки на хранилище или интернет-радио.
+ * Громкость по умолчанию невысокая — это фон под фотографии, а не плеер.
+ */
+@Composable
+private fun MusicCard(
+    settings: SlideshowSettings,
+    nowPlaying: String?,
+    onMode: (String) -> Unit,
+    onBrowse: () -> Unit,
+    onUrl: (String) -> Unit,
+    onVolume: (Int) -> Unit,
+    folders: List<String> = emptyList(),
+    onLoadFolders: () -> Unit = {},
+    onDeviceFolder: (String) -> Unit = {}
+) {
+    var url by remember(settings.musicStreamUrl) { mutableStateOf(settings.musicStreamUrl) }
+    var pickingFolder by remember { mutableStateOf(false) }
+    val modes = listOf("off", "device", "smb", "stream")
+    fun label(m: String) = when (m) {
+        "device" -> "Музыка с устройства"
+        "smb" -> "Папка на сетевом хранилище"
+        "stream" -> "Интернет-радио"
+        else -> "Выключена"
+    }
+
+    RowCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Фоновая музыка", color = Color.White, fontSize = 20.sp)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                modes.forEach { m ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .focusHighlight(RoundedCornerShape(10.dp))
+                            .background(
+                                if (m == settings.musicMode) Color(0xFF2E4A7A) else Color(0xFF1B1E22),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { onMode(m) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Text(label(m), color = Color.White, fontSize = 18.sp)
+                    }
+                }
+            }
+
+            when (settings.musicMode) {
+                "smb" -> {
+                    Text(
+                        "Папка: " + settings.musicSmbFolder.ifBlank { "не выбрана" } +
+                            " (внутри общей папки, выбранной для фотографий)",
+                        color = Color.White.copy(alpha = 0.7f), fontSize = 16.sp
+                    )
+                    Button(onClick = onBrowse) { Text("Выбрать папку с музыкой") }
+                }
+                "stream" -> {
+                    Text("Готовые станции — спокойная музыка, без регистрации:",
+                        color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp)
+                    com.fotoframe.engine.MusicPlayer.PRESETS.forEach { (name, note, presetUrl) ->
+                        val active = presetUrl == settings.musicStreamUrl
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .focusHighlight(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (active) Color(0xFF2E4A7A) else Color(0xFF1B1E22),
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { url = presetUrl; onUrl(presetUrl) }
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                        ) {
+                            Column {
+                                Text(name, color = Color.White, fontSize = 17.sp)
+                                Text(note, color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    LabeledField("Или свой адрес потока", "https://…/stream.mp3", url) { url = it }
+                    Button(onClick = { onUrl(url) }) { Text("Сохранить адрес") }
+                    Text(
+                        "Прямая ссылка на поток (mp3 или aac), http или https. Страницы сайтов и " +
+                            "плейлисты .m3u не подходят. Адреса станций иногда меняются — если " +
+                            "станция молчит, проверьте её адрес на сайте.",
+                        color = Color.White.copy(alpha = 0.45f), fontSize = 13.sp
+                    )
+                }
+                "device" -> {
+                    Text(
+                        "Папка: " + settings.musicDeviceFolder.ifBlank { "вся музыка на устройстве" },
+                        color = Color.White.copy(alpha = 0.7f), fontSize = 16.sp
+                    )
+                    Button(onClick = { onLoadFolders(); pickingFolder = !pickingFolder }) {
+                        Text(if (pickingFolder) "Свернуть список папок" else "Выбрать папку")
+                    }
+                    if (pickingFolder) {
+                        val options = listOf("") + folders
+                        if (folders.isEmpty()) {
+                            Text(
+                                "Папок не видно: либо музыки на устройстве нет, либо ещё нет " +
+                                    "разрешения на аудио, либо Android старше 10 — тогда играет всё.",
+                                color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp
+                            )
+                        }
+                        options.forEach { f ->
+                            val active = f == settings.musicDeviceFolder
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .focusHighlight(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (active) Color(0xFF2E4A7A) else Color(0xFF1B1E22),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable { onDeviceFolder(f); pickingFolder = false }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            ) {
+                                Text(f.ifBlank { "Вся музыка" }, color = Color.White, fontSize = 17.sp)
+                            }
+                        }
+                    }
+                    Text(
+                        "Понадобится разрешение на доступ к аудио.",
+                        color = Color.White.copy(alpha = 0.45f), fontSize = 13.sp
+                    )
+                }
+            }
+
+            if (settings.musicMode != "off") {
+                val v = settings.musicVolume
+                StepperRow(
+                    title = "Громкость",
+                    caption = "Музыка — фон под фотографии, не плеер: обычно хватает 30–50%",
+                    value = "$v%",
+                    onPrev = { onVolume((v - 10).coerceAtLeast(0)) },
+                    onNext = { onVolume((v + 10).coerceAtMost(100)) }
+                )
+                Text(
+                    if (nowPlaying.isNullOrBlank()) "Сейчас ничего не играет" else "Сейчас: $nowPlaying",
+                    color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                )
+            }
+        }
+    }
+}
+
+/** «30 мин», «1 ч», «1 ч 30 мин», «2 ч». */
+private fun refreshText(minutes: Int): String {
+    val h = minutes / 60
+    val m = minutes % 60
+    return when {
+        h == 0 -> "$m мин"
+        m == 0 -> "$h ч"
+        else -> "$h ч $m мин"
     }
 }
 

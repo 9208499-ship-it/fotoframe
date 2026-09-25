@@ -186,6 +186,10 @@ interface PhotoDao {
 
     // ---------- Разовые сбросы ----------
 
+    /** Подпись картины из музея — узнаётся при первом показе. */
+    @Query("UPDATE photos SET displayName = :name WHERE id = :id")
+    suspend fun setDisplayName(id: Long, name: String)
+
     @Query("UPDATE photos SET rotation = :degrees WHERE id = :id")
     suspend fun setRotation(id: Long, degrees: Int)
 
