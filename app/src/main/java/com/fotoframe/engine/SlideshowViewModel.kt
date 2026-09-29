@@ -11,6 +11,7 @@ import com.fotoframe.data.db.Photo
 import com.fotoframe.source.DeleteResult
 import com.fotoframe.source.SmbSource
 import com.fotoframe.data.prefs.SlideshowSettings
+import com.fotoframe.data.prefs.enabledMuseums
 import com.fotoframe.source.Folder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -188,6 +189,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     private var weatherJob: Job? = null
 
     private val weatherService = WeatherService(application.sources)
+    private val videoProbe = VideoProbe(application, application.sources)
     private val _nowPlaying = MutableStateFlow<String?>(null)
 
     /** Что сейчас играет — для подписи в настройках. */
@@ -208,7 +210,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             var lastSources: Triple<String?, String, String>? = null
             var lastComposition: Triple<Boolean, Boolean, Boolean>? = null
-            var lastArt: Triple<String, Boolean, Boolean>? = null
+            var lastMinVideo: Int? = null
+            var lastArt: Pair<String, Set<String>>? = null
             application.settingsStore.settings.collect { s ->
                 _state.value = _state.value.copy(settings = s)
 
@@ -219,12 +222,20 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 if (lastComposition != null && composition != lastComposition) clearQueue()
                 lastComposition = composition
 
+                // Сменили порог коротких роликов — пересчитать допуск.
+                if (lastMinVideo != null && s.minVideoSeconds != lastMinVideo) {
+                    tryOrNull { filter.apply(s) }
+                    clearQueue()
+                }
+                lastMinVideo = s.minVideoSeconds
+
                 // Музыка следует за настройками. start сам решает, нужно ли
                 // что-то менять: тот же источник — продолжает играть, другой —
                 // перезапускается. Раньше музыка стартовала из start() показа
                 // до того, как настройки успевали прочитаться с диска, видела
                 // «выключено» — и больше не запускалась.
-                if (musicAllowed && loop?.isActive == true) music.start(s)
+                if (musicAllowed && loop?.isActive == true && s.showMode != "video") music.start(s)
+                else if (s.showMode == "video") music.stop()
 
                 // Источник подключили или отключили — пересчитать допуск,
                 // чтобы его снимки сразу вошли в показ или вышли из него.
@@ -238,11 +249,12 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 // Сменили режим (фото ↔ картины) или набор музеев — пересчитать
                 // допуск и сбросить очередь, чтобы следующий же кадр был из
                 // нового режима. Музеи, которых ещё нет в индексе, подтянуть.
-                val art = Triple(s.showMode, s.artMet, s.artCleveland)
+                val art = s.showMode to s.enabledMuseums()
                 if (lastArt != null && art != lastArt) {
                     tryOrNull { filter.apply(s) }
                     clearQueue()
                     if (s.showMode == "art") ensureMuseumsIndexed(s)
+                    if (s.showMode == "video") ensureVideosIndexed()
                 } else if (lastArt == null && s.showMode == "art") {
                     ensureMuseumsIndexed(s)
                 }
@@ -273,7 +285,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     fun start(withMusic: Boolean = true) {
         musicAllowed = withMusic
         startWeather()
-        if (withMusic) music.start(_state.value.settings) else music.stop()
+        val current = _state.value.settings
+        if (withMusic && current.showMode != "video") music.start(current) else music.stop()
         if (loop?.isActive == true) return
         loop = viewModelScope.launch {
             advance()
@@ -282,6 +295,12 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 if (s.paused || s.inHistory || s.zoomed || s.menu != null) {
                     // Стоим: снимок, к которому вернулись или который поставили
                     // на паузу, не должен уехать сразу после возобновления.
+                    lastAdvanceAt = System.currentTimeMillis()
+                    delay(500)
+                    continue
+                }
+                // Ролик идёт до конца — его сменит [onVideoEnded], не таймер.
+                if (s.current?.photo?.isVideo == true) {
                     lastAdvanceAt = System.currentTimeMillis()
                     delay(500)
                     continue
@@ -323,6 +342,53 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { _musicFolders.value = tryOrNull { music.deviceFolders() }.orEmpty() }
     }
 
+    /**
+     * Плеер узнал длительность ролика. Запоминаем; если ролик короче
+     * порога, а заранее этого узнать не удалось, — сразу дальше.
+     */
+    fun onVideoDuration(photoId: Long, ms: Long) {
+        viewModelScope.launch {
+            if (ms <= 0) return@launch
+            dao.setDuration(photoId, ms)
+            val min = _state.value.settings.minVideoSeconds * 1000L
+            if (ms < min) {
+                dao.setEnabledByIds(listOf(photoId), false)
+                dropFromQueue(photoId)
+                Log.i(TAG, "Видео: короткий ролик ${ms / 1000.0} с — пропущен")
+                if (_state.value.current?.photo?.id == photoId) advance()
+            }
+        }
+    }
+
+    /** Ролик доиграл — следующий кадр, если показ не на паузе. */
+    fun onVideoEnded(photoId: Long) {
+        viewModelScope.launch {
+            val s = _state.value
+            if (s.current?.photo?.id != photoId || s.paused) return@launch
+            if (s.inHistory) _state.value = s.copy(inHistory = false)
+            advance()
+        }
+    }
+
+    /**
+     * Ролик не открылся или оборвался — дальше, не застревая на нём. Если
+     * формат не поддерживается, ролик скрывается: иначе он выпадал бы снова
+     * и снова. Скрытый виден в настройках, его можно вернуть.
+     */
+    fun onVideoError(photoId: Long, unsupported: Boolean = false) {
+        viewModelScope.launch {
+            if (unsupported) {
+                dao.setHidden(photoId, true)
+                dropFromQueue(photoId)
+                _state.value = _state.value.copy(message = "Ролик в неподдерживаемом формате пропущен и скрыт")
+                clearMessageLater()
+            }
+            if (_state.value.current?.photo?.id != photoId) return@launch
+            delay(1_500)
+            if (_state.value.current?.photo?.id == photoId) advance()
+        }
+    }
+
     /** После выдачи разрешения на аудио — собрать список заново. */
     fun restartMusic() {
         if (musicAllowed && loop?.isActive == true) {
@@ -336,7 +402,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Вернулись в приложение — музыку снова, если она включена. */
     fun resumeMusic() {
-        if (musicAllowed && loop?.isActive == true) music.start(_state.value.settings)
+        val current = _state.value.settings
+        if (musicAllowed && loop?.isActive == true && current.showMode != "video") music.start(current)
     }
 
     override fun onCleared() {
@@ -364,7 +431,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     /** Следующая ступень масштаба. На последней ступени ничего не меняет. */
     fun zoomIn() {
         val s = _state.value
-        if (s.current == null) return
+        if (s.current == null || s.current.photo.isVideo) return
         val next = ZOOM_STEPS.firstOrNull { it > s.zoom + 0.01f } ?: return
         _state.value = s.copy(zoom = next)
     }
@@ -424,7 +491,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Поворот — для первого снимка кадра; у пары второй поворачивается
         // из того же меню отдельными пунктами.
-        val rotate = listOf(
+        // Ролик не поворачивается — только снимки.
+        val rotate = if (slide.photo.isVideo) emptyList<MenuItem>() else listOf(
             MenuItem("Повернуть по часовой", rotateId = slide.photo.id, rotateBy = 90),
             MenuItem("Повернуть против часовой", rotateId = slide.photo.id, rotateBy = -90)
         ) + if (second != null) {
@@ -1046,7 +1114,12 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             // — другая история, и человек должен понимать, куда смотреть.
             val total = dao.countAll()
             val enabled = dao.countEnabled()
+            val mode = _state.value.settings.showMode
             val msg = when {
+                // Идёт обход — пустота временная, найденное появится само.
+                indexing && enabled == 0 ->
+                    if (mode == "video") "Собираю список роликов с хранилищ — при первом включении это несколько минут."
+                    else "Обновляю список — кадры появятся, как только найдутся."
                 total == 0 ->
                     "Нет проиндексированных фотографий. Откройте настройки и выберите источник."
                 enabled == 0 ->
@@ -1127,12 +1200,23 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun afterResolve(p: Photo): Photo =
         if (p.sourceId in com.fotoframe.source.MUSEUM_SOURCES) dao.photoById(p.id) ?: p else p
 
+    /**
+     * Первое включение режима «Видео»: прежние версии ролики не собирали.
+     * Обычный обход источников — теперь он видит и видео; уже известные
+     * снимки не трогаются, так что добавятся только ролики.
+     */
+    private fun ensureVideosIndexed() {
+        viewModelScope.launch {
+            if (dao.countVideos() > 0) return@launch
+            reindex { report -> Log.i(TAG, "Видео: первый обход — $report") }
+        }
+    }
+
     /** Музеи, выбранные в режиме картин, которых ещё нет в индексе. */
     private fun ensureMuseumsIndexed(s: com.fotoframe.data.prefs.SlideshowSettings) {
         viewModelScope.launch {
-            val needMet = s.artMet && dao.countAllBySource("met") == 0
-            val needCle = s.artCleveland && dao.countAllBySource("cleveland") == 0
-            if (!needMet && !needCle) return@launch
+            val missing = s.enabledMuseums().filter { dao.countAllBySource(it) == 0 }
+            if (missing.isEmpty()) return@launch
             // Пока грузится список, на экране остаётся прежний кадр, а если
             // его нет — «Готовлю первый кадр…». Потом сразу первая картина.
             indexMuseums(s)
@@ -1147,8 +1231,10 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     /** Обход выбранных музеев. Возвращает строку для отчёта. */
     private suspend fun indexMuseums(s: com.fotoframe.data.prefs.SlideshowSettings, force: Boolean = false): String {
         val parts = ArrayList<String>()
-        if (s.artMet) parts += "Метрополитен: " + indexer.index(application.sources.met, "*", force).describe()
-        if (s.artCleveland) parts += "Кливленд: " + indexer.index(application.sources.cleveland, "*", force).describe()
+        val wanted = s.enabledMuseums()
+        for (m in application.sources.museums) {
+            if (m.id in wanted) parts += "${m.title}: " + indexer.index(m, "*", force).describe()
+        }
         return parts.joinToString("\n")
     }
 
@@ -1173,6 +1259,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
      * толком, и вытеснял соседей.
      */
     private suspend fun warmToMemory(slide: Slide) {
+        if (slide.photo.isVideo) return
         val dm = application.resources.displayMetrics
         val w = dm.widthPixels.coerceAtLeast(1)
         val h = dm.heightPixels.coerceAtLeast(1)
@@ -1208,12 +1295,39 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // выпасть дважды, пока первый ещё не показан. Несколько попыток
         // это исправляют почти всегда.
         var picked: Photo? = null
-        for (attempt in 0 until 6) {
+        // Роликов коротких бывает много подряд — попыток больше.
+        val attempts = if (settings.showMode == "video") 12 else 6
+        for (attempt in 0 until attempts) {
             val p = picker.next(settings) ?: return null
-            if (p.id !in exclude) { picked = p; break }
+            if (p.id in exclude) continue
+            // Длительность ролика неизвестна — узнаём сейчас, по заголовку
+            // файла. Короткий отмечается и больше не выбирается.
+            if (p.isVideo && p.durationMs == 0L && settings.minVideoSeconds > 0) {
+                val ms = tryOrNull { videoProbe.durationMs(p) }
+                if (ms != null) {
+                    dao.setDuration(p.id, ms)
+                    if (ms < settings.minVideoSeconds * 1000L) {
+                        dao.setEnabledByIds(listOf(p.id), false)
+                        Log.i(TAG, "Видео: «${p.displayName}» — ${ms / 1000.0} с, короче порога, пропущен")
+                        continue
+                    }
+                }
+            }
+            picked = p
+            break
         }
         val chosen = picked ?: picker.next(settings) ?: return null
         val source = application.sources.byId(chosen.sourceId) ?: return null
+        // Место на устройстве — до записи, а не после отказа.
+        tryOrNull { withContext(Dispatchers.IO) { StorageGuard.ensureRoom(application) } }
+
+        // Ролик: только адрес для плеера. Не скачивается, не разбирается,
+        // в пару не встаёт.
+        if (chosen.isVideo) {
+            val videoUri = tryOrNull { source.resolveVideoUri(chosen) } ?: return null
+            return Slide(chosen, videoUri)
+        }
+
         val url = tryOrNull { source.resolveDisplayUrl(chosen) } ?: return null
 
         // Подписи для этого кадра считаются здесь же, а не ждут очереди
@@ -1339,8 +1453,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadSourceCounts() {
         viewModelScope.launch {
-            _sourceCounts.value = listOf("local", "yandex", "smb", "met", "cleveland")
-                .associateWith { dao.countAllBySource(it) }
+            _sourceCounts.value = listOf("local", "yandex", "smb", "met", "cleveland", "hermitage", "tretyakov", "rusmuseum")
+                .associateWith { dao.countAllBySource(it) } + ("video" to dao.countVideos())
         }
     }
 

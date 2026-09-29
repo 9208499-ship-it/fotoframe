@@ -75,6 +75,7 @@ class SmbSource(
         private set
 
     private val cacheDir = File(context.cacheDir, "smb").apply { mkdirs() }
+    private val appContext = context.applicationContext
 
     init {
         // Мусор от прежних версий и от прерванных загрузок.
@@ -184,7 +185,14 @@ class SmbSource(
                 share = disk
                 openedFor = key
                 lastError = null
-                Log.i(TAG, "Подключено: ${disk.smbPath}")
+                // Версия протокола, подпись и шифрование — от них зависит
+                // скорость чтения: их считает процессор, а библиотека делает
+                // это чистым Java-кодом, без аппаратного ускорения.
+                Log.i(TAG, "Подключено: ${disk.smbPath}; протокол " +
+                    "${runCatching { connection.negotiatedProtocol.dialect }.getOrNull()}, подпись " +
+                    (if (runCatching { session.isSigningRequired }.getOrDefault(false)) "обязательна" else "нет") +
+                    ", шифрование " +
+                    (if (runCatching { session.sessionContext.isEncryptData }.getOrDefault(false)) "да" else "нет"))
                 disk
             } catch (e: Throwable) {
                 // Ловим именно Throwable: на части прошивок нехватка классов
@@ -395,11 +403,13 @@ class SmbSource(
                         queue += full
                         continue
                     }
-                    if (!isImage(name)) continue
+                    val video = isVideo(name)
+                    if (!isImage(name) && !video) continue
 
                     batch += RemoteItem(
                         remoteId = full,
                         uri = full,
+                        isVideo = video,
                         displayName = name,
                         albumName = dir.substringAfterLast('\\').ifBlank { null },
                         // Время записи файла — то, что даёт SMB сразу. Это
@@ -443,6 +453,7 @@ class SmbSource(
 
             // Временное имя уникальное: показ и дообработка могут качать один
             // и тот же файл одновременно, и общий .part давал битую картинку.
+            com.fotoframe.engine.StorageGuard.ensureRoom(appContext)
             val tmp = File.createTempFile("dl_", ".part", cacheDir)
             acquire()
             try {
@@ -619,6 +630,7 @@ class SmbSource(
             return@withContext cached
         }
         val disk = share() ?: return@withContext null
+        com.fotoframe.engine.StorageGuard.ensureRoom(appContext)
         val tmp = File.createTempFile("dl_", ".part", cacheDir)
         acquire()
         try {
@@ -676,10 +688,12 @@ class SmbSource(
     private fun prune() {
         val files = cacheDir.listFiles()?.filter { it.isFile } ?: return
         var total = files.sumOf { it.length() }
-        if (total <= CACHE_LIMIT_BYTES) return
+        // Предел — не больше 400 МБ и не больше доли свободного места.
+        val limit = com.fotoframe.engine.StorageGuard.limitFor(cacheDir, CACHE_LIMIT_BYTES)
+        if (total <= limit) return
 
         for (f in files.sortedBy { it.lastModified() }) {
-            if (total <= CACHE_LIMIT_BYTES) break
+            if (total <= limit) break
             total -= f.length()
             f.delete()
         }
@@ -696,6 +710,44 @@ class SmbSource(
     private fun joinPath(parent: String, child: String): String =
         if (parent.isBlank()) child else "$parent\\$child"
 
+    /**
+     * Видео, которое ExoPlayer играет сам. AVI и AVCHD (.mts/.m2ts) не
+     * берём: первые часто в устаревших кодеках, вторые у ExoPlayer
+     * поддержаны не полностью — лучше не показывать, чем показывать чёрный
+     * экран.
+     */
+    private fun isVideo(name: String): Boolean = isPlayableVideoName(name)
+
+    override suspend fun resolveVideoUri(photo: Photo): String =
+        STREAM_SCHEME + "://" + android.net.Uri.encode(photo.uri)
+
+    /**
+     * Открыть файл для потокового чтения видеоплеером. Вызывается из потока
+     * загрузчика ExoPlayer, поэтому блокирующий. Шара помечается занятой,
+     * пока поток не закрыт, — так её не закроет переподключение посреди
+     * просмотра.
+     */
+    fun openStream(path: String): Pair<SmbFile, Long>? {
+        val disk = kotlinx.coroutines.runBlocking { share() } ?: return null
+        acquire()
+        return try {
+            val f = openForRead(disk, path)
+            val length = f.fileInformation.standardInformation.endOfFile
+            f to length
+        } catch (e: Throwable) {
+            release()
+            noteFailure(e)
+            Log.w(TAG, "Видео: не удалось открыть '$path': ${e.message}")
+            null
+        }
+    }
+
+    /** Поток закрыт — шару можно отпускать. */
+    fun closeStream(file: SmbFile) {
+        runCatching { file.close() }
+        release()
+    }
+
     private fun isImage(name: String): Boolean {
         val lower = name.lowercase()
         return lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
@@ -704,6 +756,9 @@ class SmbSource(
     }
 
     companion object {
+        /** Схема адреса ролика с сетевой папки для видеоплеера. */
+        const val STREAM_SCHEME = "smbstream"
+
         /** Расширения аудио для фоновой музыки. */
         private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "ogg", "wav", "opus")
 

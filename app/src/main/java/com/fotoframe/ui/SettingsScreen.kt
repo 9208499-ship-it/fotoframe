@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -93,8 +94,11 @@ fun SettingsScreen(
     onBackdropSaturationChange: (Float) -> Unit = {},
     onShowModeChange: (String) -> Unit = {},
     onArtMetChange: (Boolean) -> Unit = {},
+    onArtMuseumChange: (String, Boolean) -> Unit = { _, _ -> },
     onArtClevelandChange: (Boolean) -> Unit = {},
     onShowArtCaptionChange: (Boolean) -> Unit = {},
+    onArtRussianChange: (Boolean) -> Unit = {},
+    onMinVideoSecondsChange: (Int) -> Unit = {},
     onMusicModeChange: (String) -> Unit = {},
     onMusicBrowse: () -> Unit = {},
     onMusicStreamUrlChange: (String) -> Unit = {},
@@ -190,8 +194,11 @@ fun SettingsScreen(
                 counts = sourceCounts,
                 onMode = onShowModeChange,
                 onMet = onArtMetChange,
+                onMuseum = onArtMuseumChange,
                 onCleveland = onArtClevelandChange,
-                onCaption = onShowArtCaptionChange
+                onCaption = onShowArtCaptionChange,
+                onRussian = onArtRussianChange,
+                onMinVideo = onMinVideoSecondsChange
             )
         }
 
@@ -770,12 +777,26 @@ private fun LabeledField(
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                 onDone = { keyboard?.hide() }
             ),
+            // Раньше здесь была «нажимаемая» оболочка — чтобы по OK на пульте
+            // вызывать клавиатуру. Но при навигации пультом фокус доставался
+            // ей, а не полю ввода, и клавиатуре не к чему было подключиться:
+            // на старом Android (телевизор на 7.0) поле не отвечало вовсе.
+            // Теперь фокус — у самого поля, а OK на пульте только просит
+            // показать клавиатуру.
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(focusRequester)
-                .clickable {
-                    focusRequester.requestFocus()
-                    keyboard?.show()
+                .onPreviewKeyEvent { e ->
+                    val ok = e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                        e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                        e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+                    if (ok && e.nativeKeyEvent.action == android.view.KeyEvent.ACTION_UP) {
+                        focusRequester.requestFocus()
+                        keyboard?.show()
+                        true
+                    } else {
+                        false
+                    }
                 }
         )
     }
@@ -976,15 +997,42 @@ private fun ShowModeCard(
     counts: Map<String, Int>,
     onMode: (String) -> Unit,
     onMet: (Boolean) -> Unit,
+    onMuseum: (String, Boolean) -> Unit = { _, _ -> },
     onCleveland: (Boolean) -> Unit,
-    onCaption: (Boolean) -> Unit
+    onCaption: (Boolean) -> Unit,
+    onRussian: (Boolean) -> Unit = {},
+    onMinVideo: (Int) -> Unit = {}
 ) {
     RowCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Что показывать", color = Color.White, fontSize = 20.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ModeTab("Мои фотографии", settings.showMode != "art") { onMode("photos") }
+                ModeTab("Мои фотографии", settings.showMode == "photos") { onMode("photos") }
+                ModeTab("Видео", settings.showMode == "video") { onMode("video") }
                 ModeTab("Картины музеев", settings.showMode == "art") { onMode("art") }
+            }
+
+            if (settings.showMode == "video") {
+                val n = counts["video"] ?: 0
+                Text(
+                    "Ваши видео с устройства, сетевой папки и Яндекс.Диска — целиком и со звуком, " +
+                        "один ролик за другим. С сетевой папки ролик играет потоком, без " +
+                        "скачивания целиком. Вправо — следующий, влево — предыдущий, OK — пауза. " +
+                        "Фоновая музыка в этом режиме выключена. " +
+                        (if (n > 0) "Роликов в списке: $n." else "Список роликов соберётся при первом включении — на большом хранилище это минуты."),
+                    color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                )
+                val steps = listOf(0, 3, 5, 10, 15, 30)
+                val m = settings.minVideoSeconds
+                val i = steps.indexOf(m).takeIf { it >= 0 } ?: steps.indexOfFirst { it >= m }.coerceAtLeast(0)
+                StepperRow(
+                    title = "Не показывать ролики короче",
+                    caption = "Случайные нажатия «видео» вместо «фото» на телефоне. Длительность " +
+                        "узнаётся по заголовку файла, пока готовится предыдущий кадр",
+                    value = if (m == 0) "показывать все" else "$m с",
+                    onPrev = { onMinVideo(steps[(i - 1).coerceAtLeast(0)]) },
+                    onNext = { onMinVideo(steps[(i + 1).coerceAtMost(steps.lastIndex)]) }
+                )
             }
 
             if (settings.showMode == "art") {
@@ -995,6 +1043,21 @@ private fun ShowModeCard(
                     color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
                 )
                 fun countText(id: String) = (counts[id] ?: 0).let { if (it > 0) " · в списке $it" else "" }
+                SwitchRow(
+                    "Русский музей",
+                    "Около 800 картин. Названия и авторы по-русски — из Викиданных" + countText("rusmuseum"),
+                    settings.artRusMuseum
+                ) { onMuseum("rusmuseum", it) }
+                SwitchRow(
+                    "Третьяковская галерея",
+                    "Около тысячи картин" + countText("tretyakov"),
+                    settings.artTretyakov
+                ) { onMuseum("tretyakov", it) }
+                SwitchRow(
+                    "Эрмитаж",
+                    "Около 3,5 тысячи картин" + countText("hermitage"),
+                    settings.artHermitage
+                ) { onMuseum("hermitage", it) }
                 SwitchRow(
                     "Метрополитен-музей, Нью-Йорк",
                     "Европейская живопись — около 2,7 тысячи картин" + countText("met"),
@@ -1007,10 +1070,21 @@ private fun ShowModeCard(
                 )
                 SwitchRow(
                     "Подпись картины",
-                    "Автор, название, год и музей. Названия — на языке музея, обычно английском",
+                    "Автор, название, год и музей",
                     settings.showArtCaption, onCaption
                 )
-                if (!settings.artMet && !settings.artCleveland) {
+                if (settings.showArtCaption) {
+                    SwitchRow(
+                        "Подпись по-русски",
+                        "Имена художников и названия — из Викиданных, где их там нет — машинный " +
+                            "перевод. Переводится при первом показе картины. Выключено — на языке " +
+                            "музея, обычно английском",
+                        settings.artRussian, onRussian
+                    )
+                }
+                if (!settings.artMet && !settings.artCleveland && !settings.artRusMuseum &&
+                    !settings.artTretyakov && !settings.artHermitage
+                ) {
                     Text(
                         "Не выбран ни один музей — показывать нечего.",
                         color = Color(0xFFFF8A80), fontSize = 14.sp

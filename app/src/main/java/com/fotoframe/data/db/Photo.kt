@@ -93,6 +93,15 @@ data class Photo(
      */
     val rotation: Int = 0,
 
+    /** Подпись картины по-русски (Викиданные или машинный перевод); null — ещё нет. */
+    val captionRu: String? = null,
+
+    /** Запись — видеоролик, а не снимок. Для режима «Видео». */
+    val isVideo: Boolean = false,
+
+    /** Длительность ролика, мс; 0 — неизвестна или это снимок. */
+    val durationMs: Long = 0,
+
     /** Координаты съёмки из EXIF, если есть. Для подписи города. */
     val latitude: Double? = null,
     val longitude: Double? = null,
@@ -147,6 +156,8 @@ data class ThumbRow(
 data class FilterRow(
     val id: Long,
     val sourceId: String,
+    val isVideo: Boolean,
+    val durationMs: Long,
     val displayName: String,
     val albumName: String?,
     val width: Int,

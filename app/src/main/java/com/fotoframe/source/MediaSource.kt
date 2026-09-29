@@ -6,6 +6,16 @@ import com.fotoframe.data.db.Photo
  * Описание одного файла, как его вернул источник.
  * В индекс попадает после преобразования в [Photo].
  */
+/**
+ * Видео, которое ExoPlayer играет сам. AVI, WMV, FLV и AVCHD (.mts, .m2ts)
+ * не берём: у ExoPlayer они не поддержаны или поддержаны не полностью —
+ * лучше не показать, чем показать чёрный экран.
+ */
+val VIDEO_EXTENSIONS = setOf("mp4", "m4v", "mov", "mkv", "webm", "3gp", "ts")
+
+fun isPlayableVideoName(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase() in VIDEO_EXTENSIONS
+
 data class RemoteItem(
     val remoteId: String,
     val uri: String,
@@ -19,7 +29,11 @@ data class RemoteItem(
     val sizeBytes: Long = 0,
     val thumbnailUrl: String? = null,
     val latitude: Double? = null,
-    val longitude: Double? = null
+    val longitude: Double? = null,
+    /** Видеоролик, а не снимок. */
+    val isVideo: Boolean = false,
+    /** Длительность ролика, мс, если источник её знает. */
+    val durationMs: Long = 0
 )
 
 data class Folder(
@@ -62,6 +76,14 @@ interface MediaSource {
      * для облака — временная ссылка, которую нужно запросить перед показом.
      */
     suspend fun resolveDisplayUrl(photo: Photo): String
+
+    /**
+     * Адрес ролика для видеоплеера — потоком, без скачивания целиком:
+     * ролик бывает на гигабайты. По умолчанию — сам uri (так у файлов на
+     * устройстве). Сетевая папка отдаёт свою схему, которую читает
+     * [SmbDataSource]; Диск — временную прямую ссылку.
+     */
+    suspend fun resolveVideoUri(photo: Photo): String = photo.uri
 
     /**
      * Убрать файл из хранилища. Реализации по возможности не удаляют

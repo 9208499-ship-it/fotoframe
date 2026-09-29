@@ -21,13 +21,14 @@ android {
 
     defaultConfig {
         applicationId = "com.fotoframe"
-        // Android 8.0. Ниже приложение никто не проверял, а smbj и ML Kit
-        // на старых версиях ведут себя непредсказуемо — обещать поддержку,
-        // которой не видели в работе, нечестно.
-        minSdk = 26
+        // Android 7.0. Было 8.0 из осторожности: ниже приложение никто не
+        // проверял. Появился живой телевизор на Android 7.0 — проверяем на
+        // нём. Кода, которому нужен Android 8, в приложении нет: разбор
+        // времени в погоде переведён с java.time на SimpleDateFormat.
+        minSdk = 24
         targetSdk = 34
-        versionCode = 14
-        versionName = "0.9"
+        versionCode = 16
+        versionName = "1.0"
     }
 
     signingConfigs {
@@ -115,6 +116,8 @@ dependencies {
     // Фоновая музыка и интернет-радио. Встроенный MediaPlayer теряет поток
     // на мелких сетевых провалах; ExoPlayer переподключается и держит сеть.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+    // Режим «Видео»: вывод ролика на экран.
+    implementation("androidx.media3:media3-ui:1.4.1")
 
     // Сеть (Яндекс.Диск)
     implementation("com.squareup.retrofit2:retrofit:2.11.0")

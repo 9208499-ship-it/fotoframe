@@ -186,6 +186,16 @@ interface PhotoDao {
 
     // ---------- Разовые сбросы ----------
 
+    /** Сколько роликов в индексе — чтобы при первом включении режима «Видео» понять, нужен ли обход. */
+    @Query("SELECT COUNT(*) FROM photos WHERE isVideo = 1")
+    suspend fun countVideos(): Int
+
+    @Query("UPDATE photos SET durationMs = :ms WHERE id = :id")
+    suspend fun setDuration(id: Long, ms: Long)
+
+    @Query("UPDATE photos SET captionRu = :text WHERE id = :id")
+    suspend fun setCaptionRu(id: Long, text: String)
+
     /** Подпись картины из музея — узнаётся при первом показе. */
     @Query("UPDATE photos SET displayName = :name WHERE id = :id")
     suspend fun setDisplayName(id: Long, name: String)
@@ -308,7 +318,7 @@ interface PhotoDao {
     // ---------- Фильтр содержимого ----------
 
     /** Всё, что нужно фильтру, без тяжёлых полей. Решение принимает ContentFilter. */
-    @Query("SELECT id, sourceId, displayName, albumName, width, height, sizeBytes FROM photos")
+    @Query("SELECT id, sourceId, isVideo, durationMs, displayName, albumName, width, height, sizeBytes FROM photos")
     suspend fun filterRows(): List<FilterRow>
 
     @Query("UPDATE photos SET enabled = :enabled WHERE id IN (:ids)")

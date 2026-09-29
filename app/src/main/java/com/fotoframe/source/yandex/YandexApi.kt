@@ -146,6 +146,7 @@ data class Resource(
 ) {
     val isDir: Boolean get() = type == "dir"
     val isImage: Boolean get() = mediaType == "image" || mimeType?.startsWith("image/") == true
+    val isVideo: Boolean get() = mediaType == "video" || mimeType?.startsWith("video/") == true
 }
 
 @Serializable

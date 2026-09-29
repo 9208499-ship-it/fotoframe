@@ -151,8 +151,80 @@ class LocalGallerySource(private val context: Context) : MediaSource {
             }
 
             if (batch.isNotEmpty()) onBatch(batch.toList())
+            scanVideos(root, onBatch)
             true
         }
+
+    /**
+     * Видео с устройства — из видеобиблиотеки системы, отдельно от снимков.
+     * Длительность система знает сама.
+     */
+    private suspend fun scanVideos(root: String, onBatch: suspend (List<RemoteItem>) -> Unit) {
+        val projection = arrayOf(
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Video.Media.DATE_TAKEN,
+            MediaStore.Video.Media.DATE_MODIFIED,
+            MediaStore.Video.Media.WIDTH,
+            MediaStore.Video.Media.HEIGHT,
+            MediaStore.Video.Media.SIZE,
+            MediaStore.Video.Media.DURATION
+        )
+        val selection = if (root.isNotEmpty() && root != "*") "${MediaStore.Video.Media.BUCKET_ID} = ?" else null
+        val args = if (selection != null) arrayOf(root) else null
+
+        val batch = ArrayList<RemoteItem>(BATCH)
+        val cursor = runCatching {
+            context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, projection, selection, args,
+                "${MediaStore.Video.Media.DATE_TAKEN} DESC"
+            )
+        }.getOrNull() ?: return
+
+        cursor.use { c ->
+            val idCol = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val nameCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val bucketCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+            val takenCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_TAKEN)
+            val modifiedCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED)
+            val wCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
+            val hCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
+            val sizeCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+            val durCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
+
+            while (c.moveToNext()) {
+                // Система отдаёт все ролики подряд, в том числе AVI и WMV,
+                // которые плеер не откроет. Отсев — тот же, что у сетевой папки.
+                val name = c.getString(nameCol) ?: ""
+                if (!isPlayableVideoName(name)) continue
+                val mediaId = c.getLong(idCol)
+                val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mediaId)
+                val dateTaken = c.getLong(takenCol)
+                val exact = dateTaken > 0
+                batch += RemoteItem(
+                    // Номера видео и снимков в системе не пересекаются по
+                    // смыслу, но могут совпасть числом — отсюда приставка.
+                    remoteId = "v$mediaId",
+                    uri = uri.toString(),
+                    displayName = name,
+                    albumName = c.getString(bucketCol),
+                    takenAt = if (exact) dateTaken else c.getLong(modifiedCol) * 1000L,
+                    takenAtExact = exact,
+                    width = c.getInt(wCol),
+                    height = c.getInt(hCol),
+                    sizeBytes = c.getLong(sizeCol),
+                    isVideo = true,
+                    durationMs = c.getLong(durCol)
+                )
+                if (batch.size >= BATCH) {
+                    onBatch(batch.toList())
+                    batch.clear()
+                }
+            }
+        }
+        if (batch.isNotEmpty()) onBatch(batch.toList())
+    }
 
     override suspend fun resolveDisplayUrl(photo: Photo): String = photo.uri
 

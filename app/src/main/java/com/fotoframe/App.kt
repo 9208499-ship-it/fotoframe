@@ -257,9 +257,14 @@ class App : Application(), ImageLoaderFactory {
                     .build()
             }
             .diskCache {
+                // Доля места на диске, а не фиксированные полгигабайта: на
+                // приставке с 8 ГБ памяти кэш вместе с остальными забивал
+                // устройство целиком.
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("images"))
-                    .maxSizeBytes(512L * 1024 * 1024)
+                    .maxSizePercent(0.02)
+                    .minimumMaxSizeBytes(32L * 1024 * 1024)
+                    .maximumMaxSizeBytes(256L * 1024 * 1024)
                     .build()
             }
             .respectCacheHeaders(false)

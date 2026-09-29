@@ -93,8 +93,14 @@ class SourceRegistry(
     val smb = SmbSource(context, settings)
     val met = MetMuseumSource(context, http, dao)
     val cleveland = ClevelandMuseumSource(context, http, dao)
+    val hermitage = WikidataMuseumSource(context, http, dao, "hermitage", "Эрмитаж", "Государственный Эрмитаж", "Q132783")
+    val tretyakov = WikidataMuseumSource(context, http, dao, "tretyakov", "Третьяковская галерея", "Государственная Третьяковская галерея", "Q183334")
+    val rusmuseum = WikidataMuseumSource(context, http, dao, "rusmuseum", "Русский музей", "Государственный Русский музей", "Q211043")
 
-    val all: List<MediaSource> = listOf(local, yandex, smb, met, cleveland)
+    /** Российские музеи — первыми: их просили в первую очередь. */
+    val museums: List<MuseumSource> = listOf(rusmuseum, tretyakov, hermitage, met, cleveland)
+
+    val all: List<MediaSource> = listOf(local, yandex, smb) + museums
 
     fun byId(id: String): MediaSource? = all.firstOrNull { it.id == id }
 

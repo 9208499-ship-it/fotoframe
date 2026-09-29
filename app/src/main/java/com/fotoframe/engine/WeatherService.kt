@@ -285,8 +285,15 @@ class WeatherService(private val sources: SourceRegistry) {
     private fun parseTime(raw: String?): Long? {
         if (raw.isNullOrBlank()) return null
         raw.toLongOrNull()?.let { return if (it < 100_000_000_000L) it * 1000 else it }
-        return runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
-            ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() }.getOrNull()
+        // java.time появился только в Android 8 — разбираем ISO-время
+        // старым способом, он есть везде. «2026-09-23T10:00:00Z» и
+        // «…+03:00», с долями секунд и без.
+        val clean = raw.replace(Regex("\\.\\d+"), "")
+        for (pattern in listOf("yyyy-MM-dd'T'HH:mm:ssXXX", "yyyy-MM-dd'T'HH:mmXXX")) {
+            val f = java.text.SimpleDateFormat(pattern, java.util.Locale.US)
+            runCatching { f.parse(clean)?.time }.getOrNull()?.let { return it }
+        }
+        return null
     }
 
     private fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.content

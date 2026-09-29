@@ -387,7 +387,9 @@ class PhotoEnricher(
      */
     private fun sourceDown(photo: Photo): Boolean =
         (photo.sourceId == "smb" && sources.smb.isDown()) ||
-            photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
+            photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES ||
+            // Ролики — не снимки: EXIF, лица и отпечатки к ним не относятся.
+            photo.isVideo
 
     private fun isHeif(name: String): Boolean {
         val lower = name.lowercase()

@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import kotlinx.coroutines.flow.first
+import android.util.Log
+import android.content.Intent
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -91,6 +94,7 @@ class MainActivity : ComponentActivity() {
         applyImmersive(true)
 
         val store = (application as App).settingsStore
+        applySetupExtras(intent)
 
         setContent {
             FotoFrameTheme {
@@ -226,8 +230,11 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onArtMetChange = { lifecycleScope.launch { store.setArtMet(it) } },
+                        onArtMuseumChange = { id, on -> lifecycleScope.launch { store.setArtMuseum(id, on) } },
                         onArtClevelandChange = { lifecycleScope.launch { store.setArtCleveland(it) } },
                         onShowArtCaptionChange = { lifecycleScope.launch { store.setShowArtCaption(it) } },
+                        onArtRussianChange = { lifecycleScope.launch { store.setArtRussian(it) } },
+                        onMinVideoSecondsChange = { lifecycleScope.launch { store.setMinVideoSeconds(it) } },
                         onMusicModeChange = { mode ->
                             lifecycleScope.launch {
                                 store.setMusicMode(mode)
@@ -376,6 +383,9 @@ class MainActivity : ComponentActivity() {
                             if (item?.openSettings == true) showSettings = true
                         },
                         onMenuClose = { vm.closeMenu() },
+                        onVideoEnded = { vm.onVideoEnded(it) },
+                        onVideoError = { id, unsupported -> vm.onVideoError(id, unsupported) },
+                        onVideoDuration = { id, ms -> vm.onVideoDuration(id, ms) },
                         onTap = { if (state.zoomed) vm.resetZoom() else vm.togglePause() },
                         onSwipeNext = { if (!state.zoomed) vm.skip() },
                         onSwipePrev = { if (!state.zoomed) vm.back() },
@@ -424,6 +434,7 @@ class MainActivity : ComponentActivity() {
         val wanted = buildList {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.READ_MEDIA_IMAGES)
+                add(Manifest.permission.READ_MEDIA_VIDEO)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
                 }
@@ -627,6 +638,49 @@ class MainActivity : ComponentActivity() {
             }
             else -> super.onKeyDown(keyCode, event)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        applySetupExtras(intent)
+    }
+
+    /**
+     * Настройка без клавиатуры — одной командой с компьютера:
+     *
+     *   adb shell am start -n com.fotoframe/.MainActivity \
+     *     --es smb_host 192.168.100.31 --es smb_share homes \
+     *     --es smb_user OAA --es smb_password '…' --es smb_folder 'Photos'
+     *
+     * На телевизоре набирать пультом адрес и пароль мучительно, а на части
+     * старых моделей экранная клавиатура не всплывает вовсе. Переданные
+     * значения ложатся поверх текущих; не переданные не меняются. После
+     * записи — обычное обновление списка.
+     */
+    private fun applySetupExtras(incoming: Intent?) {
+        val intent = incoming ?: return
+        val x = intent.extras ?: return
+        val keys = listOf("smb_host", "smb_share", "smb_user", "smb_password", "smb_folder", "yandex_token")
+        if (keys.none { x.containsKey(it) }) return
+        val store = (application as App).settingsStore
+        lifecycleScope.launch {
+            val cur = store.settings.first()
+            if (keys.take(5).any { x.containsKey(it) }) {
+                store.setSmb(
+                    x.getString("smb_host") ?: cur.smbHost,
+                    x.getString("smb_share") ?: cur.smbShare,
+                    x.getString("smb_user") ?: cur.smbUser,
+                    x.getString("smb_password") ?: cur.smbPassword,
+                    x.getString("smb_folder") ?: cur.smbFolder
+                )
+            }
+            x.getString("yandex_token")?.let { store.setYandexToken(it.ifBlank { null }) }
+            Log.i("FotoFrame", "Настройки получены командой: " + keys.filter { x.containsKey(it) }.joinToString())
+            status = "Настройки получены с компьютера. Обновляю список…"
+            vm.reindex { status = it }
+        }
+        // Второй раз при повороте экрана не применять.
+        keys.forEach { intent.removeExtra(it) }
     }
 
     override fun onStart() {

@@ -1,5 +1,7 @@
 package com.fotoframe.engine
 
+import com.fotoframe.data.prefs.enabledMuseums
+
 import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
@@ -69,7 +71,22 @@ class Indexer(
                 skipped += batch.size - fresh.size
 
                 if (fresh.isNotEmpty()) {
-                    dao.insertAll(fresh.map { it.toPhoto(source.id, now) })
+                    // Новые записи сразу получают допуск по текущему режиму:
+                    // иначе ролики, найденные обычным обходом, до конца
+                    // обхода попадали бы в показ фотографий, а в режиме
+                    // «Видео» не появлялись бы, пока обход не закончится.
+                    val mode = settings.settings.first().showMode
+                    dao.insertAll(fresh.map { item ->
+                        val row = item.toPhoto(source.id, now)
+                        val museum = source.id in com.fotoframe.source.MUSEUM_SOURCES
+                        row.copy(
+                            enabled = when {
+                                museum -> mode == "art"
+                                row.isVideo -> mode == "video"
+                                else -> mode == "photos"
+                            }
+                        )
+                    })
                     added += fresh.size
                 }
 
@@ -142,7 +159,9 @@ class Indexer(
         sizeBytes = sizeBytes,
         thumbnailUrl = thumbnailUrl,
         latitude = latitude,
-        longitude = longitude
+        longitude = longitude,
+        isVideo = isVideo,
+        durationMs = durationMs
         )
     }
 
@@ -216,8 +235,10 @@ class IndexWorker(
 
             // Музеи обходятся только в режиме картин: вне его их списки не нужны.
             if (current.showMode == "art") {
-                if (current.artMet) results += "met: " + indexer.index(app.sources.met, "*").describe()
-                if (current.artCleveland) results += "cleveland: " + indexer.index(app.sources.cleveland, "*").describe()
+                val wanted = current.enabledMuseums()
+                for (m in app.sources.museums) {
+                    if (m.id in wanted) results += "${m.id}: " + indexer.index(m, "*").describe()
+                }
             }
             Log.i(TAG, "Фоновое обновление: " + results.joinToString("; "))
 

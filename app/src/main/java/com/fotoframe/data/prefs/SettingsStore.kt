@@ -157,12 +157,24 @@ data class SlideshowSettings(
      */
     val showMode: String = "photos",
 
-    /** Музеи в режиме картин — перемешиваются между собой. */
+    /** Музеи в режиме картин — перемешиваются между собой. Российские — через Викиданные. */
+    val artRusMuseum: Boolean = true,
+    val artTretyakov: Boolean = true,
+    val artHermitage: Boolean = true,
     val artMet: Boolean = true,
     val artCleveland: Boolean = true,
 
     /** Подпись картины: автор, название, год и музей. */
     val showArtCaption: Boolean = true,
+
+    /** Подпись картины по-русски, если перевод есть; иначе — на языке музея. */
+    val artRussian: Boolean = true,
+
+    /**
+     * Ролики короче этого, секунды, не показываются — случайные нажатия
+     * «видео» вместо «фото» на телефоне. 0 — показывать все.
+     */
+    val minVideoSeconds: Int = 5,
 
     // ---------- Фон под снимком ----------
 
@@ -305,8 +317,13 @@ class SettingsStore(private val context: Context) {
         val backdropSaturation = floatPreferencesKey("backdrop_saturation")
         val showMode = stringPreferencesKey("show_mode")
         val artMet = booleanPreferencesKey("art_met")
+        val artRusMuseum = booleanPreferencesKey("art_rusmuseum")
+        val artTretyakov = booleanPreferencesKey("art_tretyakov")
+        val artHermitage = booleanPreferencesKey("art_hermitage")
         val artCleveland = booleanPreferencesKey("art_cleveland")
         val showArtCaption = booleanPreferencesKey("show_art_caption")
+        val artRussian = booleanPreferencesKey("art_russian")
+        val minVideoSeconds = intPreferencesKey("min_video_seconds")
         val musicMode = stringPreferencesKey("music_mode")
         val musicSmbFolder = stringPreferencesKey("music_smb_folder")
         val musicDeviceFolder = stringPreferencesKey("music_device_folder")
@@ -374,8 +391,13 @@ class SettingsStore(private val context: Context) {
             backdropSaturation = p[Keys.backdropSaturation] ?: defaults.backdropSaturation,
             showMode = p[Keys.showMode] ?: defaults.showMode,
             artMet = p[Keys.artMet] ?: defaults.artMet,
+            artRusMuseum = p[Keys.artRusMuseum] ?: defaults.artRusMuseum,
+            artTretyakov = p[Keys.artTretyakov] ?: defaults.artTretyakov,
+            artHermitage = p[Keys.artHermitage] ?: defaults.artHermitage,
             artCleveland = p[Keys.artCleveland] ?: defaults.artCleveland,
             showArtCaption = p[Keys.showArtCaption] ?: defaults.showArtCaption,
+            artRussian = p[Keys.artRussian] ?: defaults.artRussian,
+            minVideoSeconds = p[Keys.minVideoSeconds] ?: defaults.minVideoSeconds,
             musicMode = p[Keys.musicMode] ?: defaults.musicMode,
             musicSmbFolder = p[Keys.musicSmbFolder] ?: defaults.musicSmbFolder,
             musicDeviceFolder = p[Keys.musicDeviceFolder] ?: defaults.musicDeviceFolder,
@@ -432,8 +454,19 @@ class SettingsStore(private val context: Context) {
     suspend fun setBackdropSaturation(v: Float) = edit { it[Keys.backdropSaturation] = v.coerceIn(0f, 1.5f) }
     suspend fun setShowMode(v: String) = edit { it[Keys.showMode] = v }
     suspend fun setArtMet(v: Boolean) = edit { it[Keys.artMet] = v }
+    suspend fun setArtMuseum(id: String, v: Boolean) = edit {
+        when (id) {
+            "rusmuseum" -> it[Keys.artRusMuseum] = v
+            "tretyakov" -> it[Keys.artTretyakov] = v
+            "hermitage" -> it[Keys.artHermitage] = v
+            "met" -> it[Keys.artMet] = v
+            "cleveland" -> it[Keys.artCleveland] = v
+        }
+    }
     suspend fun setArtCleveland(v: Boolean) = edit { it[Keys.artCleveland] = v }
     suspend fun setShowArtCaption(v: Boolean) = edit { it[Keys.showArtCaption] = v }
+    suspend fun setArtRussian(v: Boolean) = edit { it[Keys.artRussian] = v }
+    suspend fun setMinVideoSeconds(v: Int) = edit { it[Keys.minVideoSeconds] = v.coerceIn(0, 60) }
     suspend fun setMusicMode(v: String) = edit { it[Keys.musicMode] = v }
     suspend fun setMusicSmbFolder(v: String) = edit { it[Keys.musicSmbFolder] = v }
     suspend fun setMusicDeviceFolder(v: String) = edit { it[Keys.musicDeviceFolder] = v }
@@ -505,3 +538,12 @@ class SettingsStore(private val context: Context) {
 const val YANDEX_REFRESH_MIN = 30
 const val YANDEX_REFRESH_MAX = 360
 const val YANDEX_REFRESH_STEP = 30
+
+/** Включённые в режиме картин музеи — по идентификаторам источников. */
+fun SlideshowSettings.enabledMuseums(): Set<String> = buildSet {
+    if (artRusMuseum) add("rusmuseum")
+    if (artTretyakov) add("tretyakov")
+    if (artHermitage) add("hermitage")
+    if (artMet) add("met")
+    if (artCleveland) add("cleveland")
+}

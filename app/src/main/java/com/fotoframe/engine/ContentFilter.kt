@@ -3,6 +3,7 @@ package com.fotoframe.engine
 import com.fotoframe.data.db.FilterRow
 import com.fotoframe.data.db.PhotoDao
 import com.fotoframe.data.prefs.SlideshowSettings
+import com.fotoframe.data.prefs.enabledMuseums
 
 /**
  * Что допускать к показу.
@@ -39,7 +40,18 @@ class ContentFilter(private val dao: PhotoDao) {
             // мелкие файлы и служебные папки — у музея таких нет, а размеров
             // до первого показа неизвестно.
             val museum = r.sourceId in com.fotoframe.source.MUSEUM_SOURCES
-            val ok = r.sourceId in active && (museum || allowed(r, s, minPixels, minBytes))
+            // Ролики — только в режиме «Видео», снимки — только вне его.
+            // Фильтр содержимого (разрешение, размер, скриншоты) — про
+            // снимки, к роликам не применяется.
+            val video = s.showMode == "video"
+            // Длительность 0 — ещё не известна: такой ролик допускается,
+            // её узнают перед показом.
+            val tooShort = r.durationMs in 1 until s.minVideoSeconds * 1000L
+            val ok = r.sourceId in active && when {
+                museum -> true
+                video -> r.isVideo && !tooShort
+                else -> !r.isVideo && allowed(r, s, minPixels, minBytes)
+            }
             if (ok) enable += r.id else disable += r.id
         }
 
@@ -54,8 +66,7 @@ class ContentFilter(private val dao: PhotoDao) {
     private fun activeSources(s: SlideshowSettings): Set<String> = buildSet {
         // Фотографии и картины — разные режимы, не смешиваются.
         if (s.showMode == "art") {
-            if (s.artMet) add("met")
-            if (s.artCleveland) add("cleveland")
+            addAll(s.enabledMuseums())
         } else {
             add("local")
             if (!s.yandexToken.isNullOrBlank()) add("yandex")

@@ -106,6 +106,8 @@ class MusicPlayer(
         currentKey = null
         buildJob?.cancel()
         retryJob?.cancel()
+        watchJob?.cancel()
+        stalledSince = 0L
         releasePlayer()
         nowPlaying = null
     }
@@ -221,8 +223,37 @@ class MusicPlayer(
         playUri(uri, track.title)
     }
 
+    /** С какого момента игрок молчит, хотя должен играть; 0 — играет. */
+    @Volatile
+    private var stalledSince = 0L
+    private var watchJob: Job? = null
+
+    /**
+     * Сторож: если игрок молчит дольше [STALL_MS], хотя должен играть, —
+     * поток завис без ошибки (бывает на провалах сети). Радио —
+     * переподключаем, файл — следующий трек.
+     */
+    private fun startWatchdog() {
+        if (watchJob?.isActive == true) return
+        watchJob = scope.launch {
+            while (running) {
+                delay(10_000)
+                val since = stalledSince
+                val p = player ?: continue
+                if (since != 0L && p.playWhenReady && !p.isPlaying &&
+                    System.currentTimeMillis() - since > STALL_MS
+                ) {
+                    Log.w(TAG, "Музыка: тишина ${(System.currentTimeMillis() - since) / 1000} с, состояние ${p.playbackState}")
+                    stalledSince = System.currentTimeMillis()
+                    if (stationTitle != null) reconnect("тишина") else playNext()
+                }
+            }
+        }
+    }
+
     private fun playUri(uri: Uri, title: String) {
         if (!running) return
+        startWatchdog()
         val p = player ?: createPlayer().also { player = it }
         p.setMediaItem(MediaItem.fromUri(uri))
         p.prepare()
@@ -238,7 +269,12 @@ class MusicPlayer(
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .build(),
-                /* handleAudioFocus = */ true
+                // Фокус не уступаем. На приставках какой-то системный
+                // компонент через несколько минут забирает аудиофокус насовсем —
+                // и любой вежливый плеер (Яндекс Музыка тоже) встаёт на паузу
+                // до ручного запуска. Рамке это не нужно: музыка играет, только
+                // пока рамка на экране, в фоне она выключается сама.
+                /* handleAudioFocus = */ false
             )
             // Блокировка процессора и Wi-Fi на время воспроизведения —
             // иначе приставка, экономя энергию, роняла поток через пару минут.
@@ -247,6 +283,29 @@ class MusicPlayer(
         p.volume = volume
 
         p.addListener(object : Player.Listener {
+            // Кто-то снял воспроизведение с паузы не по нашей воле —
+            // пишем причину и продолжаем.
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady || !running) return
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) return
+                Log.w(TAG, "Музыка: остановлена системой (причина $reason) — продолжаю")
+                scope.launch {
+                    delay(1_000)
+                    if (running) player?.playWhenReady = true
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    // Восстановились после обрыва — в лог, чтобы по нему было
+                    // видно не только обрыв, но и чем он кончился.
+                    if (attempts > 0) Log.i(TAG, "Музыка: снова играет (попыток: $attempts)")
+                    stalledSince = 0L
+                } else if (running && stalledSince == 0L) {
+                    stalledSince = System.currentTimeMillis()
+                }
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 // Трек закончился — следующий. У радио конца нет; если поток
                 // всё же «закончился», это обрыв — переподключаемся.
@@ -314,6 +373,9 @@ class MusicPlayer(
     companion object {
         private const val TAG = "Music"
         private const val MAX_TRACKS = 2000
+
+        /** Сколько тишины считать зависанием потока. */
+        private const val STALL_MS = 25_000L
 
         /**
          * Готовые станции со спокойной музыкой, без регистрации. Отобраны

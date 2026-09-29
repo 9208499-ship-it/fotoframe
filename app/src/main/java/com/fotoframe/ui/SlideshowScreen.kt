@@ -56,6 +56,14 @@ fun SlideshowScreen(
     onPinchOut: () -> Unit = {},
     onLoadError: (photoId: Long) -> Unit = {},
     onLoadSuccess: (photoId: Long) -> Unit = {},
+    /** Ролик доиграл. */
+    onVideoEnded: (photoId: Long) -> Unit = {},
+    /** Ролик не открылся или оборвался; unsupported — формат не играется вовсе. */
+    onVideoError: (photoId: Long, unsupported: Boolean) -> Unit = { _, _ -> },
+    /** Плеер узнал длительность ролика. */
+    onVideoDuration: (photoId: Long, ms: Long) -> Unit = { _, _ -> },
+    /** Ролики без звука — в заставке, которая включается сама, в том числе ночью. */
+    videoMuted: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -150,7 +158,19 @@ fun SlideshowScreen(
             val flash = flashAlpha(resolvedTransition, state.settings.transitionMillis)
 
             Box(effect) {
-            SlideImage(
+            if (target.photo.isVideo) {
+                // Уходящий ролик в анимации перехода стоит на паузе и без
+                // звука — иначе на полсекунды звучали бы два ролика сразу.
+                VideoSlide(
+                    uri = target.displayUrl,
+                    paused = !isCurrent || state.paused,
+                    muted = videoMuted || !isCurrent,
+                    onEnded = { onVideoEnded(target.photo.id) },
+                    onError = { unsupported -> onVideoError(target.photo.id, unsupported) },
+                    title = target.photo.displayName,
+                    onDuration = { ms -> if (isCurrent) onVideoDuration(target.photo.id, ms) }
+                )
+            } else SlideImage(
                 slide = target,
                 fitMode = state.settings.fitMode,
                 faceFocus = state.settings.faceFocus,
@@ -294,7 +314,7 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         if (isArt) {
             // Картина: «Автор — Название, год» и музей. Подписи фото
             // (дата съёмки, место, имя файла) к картинам не относятся.
-            if (settings.showArtCaption && photo != null) ArtCaption(photo)
+            if (settings.showArtCaption && photo != null) ArtCaption(photo, settings.artRussian)
         } else {
             // Только настоящая дата съёмки: у файлов с сетевой папки до разбора
             // EXIF в takenAt лежит дата копирования, и её показывать не надо.
@@ -321,8 +341,9 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
 
 /** Подпись картины: первая строка — автор, название и год, вторая — музей. */
 @Composable
-private fun ArtCaption(photo: com.fotoframe.data.db.Photo) {
-    Text(text = photo.displayName, fontSize = 20.sp, alpha = 0.85f)
+private fun ArtCaption(photo: com.fotoframe.data.db.Photo, russian: Boolean = true) {
+    val line = if (russian) photo.captionRu ?: photo.displayName else photo.displayName
+    Text(text = line, fontSize = 20.sp, alpha = 0.85f)
     photo.albumName?.takeIf { it.isNotBlank() && it != photo.displayName }?.let {
         Text(text = it, fontSize = 16.sp, alpha = 0.65f)
     }
@@ -512,7 +533,7 @@ private fun SecondCaption(
         if (showName) {
             Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
         }
-        if (showArt) ArtCaption(photo)
+        if (showArt) ArtCaption(photo, settings.artRussian)
     }
 }
 

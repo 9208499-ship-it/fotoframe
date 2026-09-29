@@ -107,7 +107,7 @@ class YandexDiskSource(
             val page = api.listFiles(auth = auth, limit = PAGE, offset = offset)
             if (page.items.isEmpty()) break
 
-            val items = page.items.filter { it.isImage }
+            val items = page.items.filter { it.isImage || it.isVideo }
             if (items.isNotEmpty()) onBatch(items.map { it.toRemoteItem() })
 
             offset += page.items.size
@@ -137,7 +137,7 @@ class YandexDiskSource(
 
                 queue += items.filter { it.isDir }.map { it.path }
 
-                val images = items.filter { !it.isDir && it.isImage }
+                val images = items.filter { !it.isDir && (it.isImage || it.isVideo) }
                 if (images.isNotEmpty()) onBatch(images.map { it.toRemoteItem() })
 
                 offset += items.size
@@ -145,6 +145,10 @@ class YandexDiskSource(
             }
         }
     }
+
+    /** Ролик — прямой ссылкой на файл: плеер читает его частями, по запросам диапазонов. */
+    override suspend fun resolveVideoUri(photo: Photo): String =
+        downloadUrl(photo) ?: throw IllegalStateException("Диск не дал ссылку на ролик")
 
     override suspend fun resolveDisplayUrl(photo: Photo): String =
         withContext(Dispatchers.IO) {
@@ -208,7 +212,8 @@ class YandexDiskSource(
             takenAt = taken,
             takenAtExact = exifDate != null,
             sizeBytes = size,
-            thumbnailUrl = preview
+            thumbnailUrl = preview,
+            isVideo = isVideo
         )
     }
 

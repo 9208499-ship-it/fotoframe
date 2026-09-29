@@ -73,7 +73,13 @@ class FrameDreamService : DreamService(), LifecycleOwner, SavedStateRegistryOwne
                     SlideshowScreen(
                         state = state,
                         onLoadError = { model.reportLoadFailure(it) },
-                        onLoadSuccess = { model.reportLoadSuccess(it) }
+                        onLoadSuccess = { model.reportLoadSuccess(it) },
+                        onVideoEnded = { model.onVideoEnded(it) },
+                        onVideoError = { id, unsupported -> model.onVideoError(id, unsupported) },
+                        onVideoDuration = { id, ms -> model.onVideoDuration(id, ms) },
+                        // Заставка включается сама, в том числе ночью, —
+                        // ролики в ней без звука.
+                        videoMuted = true
                     )
                 }
             }
