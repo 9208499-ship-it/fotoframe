@@ -35,6 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.runtime.CompositionLocalProvider
 import com.fotoframe.engine.ActionMenu
 import com.fotoframe.engine.SlideshowState
 import kotlinx.coroutines.delay
@@ -193,7 +196,14 @@ fun SlideshowScreen(
             }
         }
 
-        Overlay(state, Modifier.align(Alignment.BottomStart))
+        // Масштаб надписей — одной настройкой на всё, что поверх кадра.
+        val density = LocalDensity.current
+        val scaled = remember(density, state.settings.textScale) {
+            Density(density.density, density.fontScale * state.settings.textScale)
+        }
+        CompositionLocalProvider(LocalDensity provides scaled) {
+            Overlay(state, Modifier.align(Alignment.BottomStart))
+        }
 
         if (state.zoomed) ZoomBadge(state.zoom, Modifier.align(Alignment.TopEnd))
 
@@ -226,7 +236,9 @@ fun SlideshowScreen(
         // У пары подпись левого снимка стоит слева под часами, правого —
         // в своём углу: иначе дата и место относились бы непонятно к чему.
         slide.second?.let { right ->
-            SecondCaption(state, right, Modifier.align(Alignment.BottomEnd))
+            CompositionLocalProvider(LocalDensity provides scaled) {
+                SecondCaption(state, right, Modifier.align(Alignment.BottomEnd))
+            }
         }
     }
 }
@@ -296,6 +308,7 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         }
         val photo = state.current?.photo
         val isArt = photo != null && photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
+        val captionReady = rememberCaptionShown(photo?.id ?: -1L, settings.captionDelaySeconds)
         val hasPhotoCaption = photo != null && (
             if (isArt) {
                 settings.showArtCaption
@@ -314,7 +327,7 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         if (isArt) {
             // Картина: «Автор — Название, год» и музей. Подписи фото
             // (дата съёмки, место, имя файла) к картинам не относятся.
-            if (settings.showArtCaption && photo != null) ArtCaption(photo, settings.artRussian)
+            if (settings.showArtCaption && photo != null && captionReady) ArtCaption(photo, settings.artRussian)
         } else {
             // Только настоящая дата съёмки: у файлов с сетевой папки до разбора
             // EXIF в takenAt лежит дата копирования, и её показывать не надо.
@@ -332,17 +345,34 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
                     alpha = 0.75f
                 )
             }
-            if (settings.showFileName && photo != null) {
+            if (settings.showFileName && photo != null && captionReady) {
                 Text(text = fileTitle(photo.displayName), fontSize = 18.sp, alpha = 0.75f)
             }
         }
     }
 }
 
+/**
+ * Подпись появляется через [delaySeconds] после смены кадра — чтобы успеть
+ * угадать автора картины или вспомнить, где снято. 0 — сразу.
+ */
+@Composable
+private fun rememberCaptionShown(photoId: Long, delaySeconds: Int): Boolean {
+    var shown by remember(photoId) { mutableStateOf(delaySeconds <= 0) }
+    LaunchedEffect(photoId, delaySeconds) {
+        if (delaySeconds > 0 && !shown) delay(delaySeconds * 1000L)
+        shown = true
+    }
+    return shown
+}
+
 /** Подпись картины: первая строка — автор, название и год, вторая — музей. */
 @Composable
 private fun ArtCaption(photo: com.fotoframe.data.db.Photo, russian: Boolean = true) {
-    val line = if (russian) photo.captionRu ?: photo.displayName else photo.displayName
+    // Ссылка вместо автора («значение неизвестно» в Викиданных) в подпись не идёт.
+    val line = (if (russian) photo.captionRu ?: photo.displayName else photo.displayName)
+        .replace(Regex("https?://\\S+(\\s+—\\s+)?"), "")
+        .trim()
     Text(text = line, fontSize = 20.sp, alpha = 0.85f)
     photo.albumName?.takeIf { it.isNotBlank() && it != photo.displayName }?.let {
         Text(text = it, fontSize = 16.sp, alpha = 0.65f)
@@ -509,8 +539,9 @@ private fun SecondCaption(
     val isArt = photo.sourceId in com.fotoframe.source.MUSEUM_SOURCES
     val showDate = !isArt && settings.showPhotoDate && photo.takenAtExact
     val showPlace = !isArt && settings.showLocation && !photo.placeName.isNullOrBlank()
-    val showName = !isArt && settings.showFileName
-    val showArt = isArt && settings.showArtCaption
+    val captionReady = rememberCaptionShown(photo.id, settings.captionDelaySeconds)
+    val showName = !isArt && settings.showFileName && captionReady
+    val showArt = isArt && settings.showArtCaption && captionReady
     if (!showDate && !showPlace && !showName && !showArt) return
 
     Column(

@@ -56,6 +56,8 @@ class LocalGallerySource(private val context: Context) : MediaSource {
 
     override suspend fun listFolders(parent: String?): List<Folder> =
         withContext(Dispatchers.IO) {
+            // Альбомы галереи плоские: внутри альбома вложенных нет.
+            if (parent != null) return@withContext emptyList()
             val out = LinkedHashMap<String, Folder>()
             val projection = arrayOf(MediaStore.Images.Media.BUCKET_ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
 

@@ -41,6 +41,22 @@ interface PhotoDao {
     )
     suspend fun photoAtRecencyOffset(offset: Int, cooldownBefore: Long = 0): Photo?
 
+    /**
+     * Самый старый ещё не показанный в этом круге — для порядка «от старых
+     * к новым». Снимки без даты съёмки (takenAt = 0) идут в конце, а не в
+     * начале: иначе показ открывался бы сотней скачанных картинок без даты.
+     */
+    @Query(
+        """
+        SELECT * FROM photos
+        WHERE enabled = 1 AND hidden = 0 AND shownInCycle = 0
+          AND (:cooldownBefore = 0 OR lastShownAt < :cooldownBefore)
+        ORDER BY (takenAt = 0), takenAt ASC, id ASC
+        LIMIT 1
+        """
+    )
+    suspend fun oldestUnshown(cooldownBefore: Long = 0): Photo?
+
     @Query(
         """
         SELECT COUNT(*) FROM photos
@@ -289,6 +305,20 @@ interface PhotoDao {
     @Query("UPDATE photos SET placeName = NULL, placeTries = 0 WHERE placeName IS NOT NULL")
     suspend fun resetPlaces()
 
+    /**
+     * Снимки, у которых координат не нашлось, — прочитать EXIF заново:
+     * разбор координат стал терпимее к снимкам без пометок «север/восток».
+     * Видео и картины музеев не трогаем.
+     */
+    @Query(
+        """
+        UPDATE photos SET metaDone = 0, metaTries = 0
+        WHERE metaDone = 1 AND latitude IS NULL AND isVideo = 0
+          AND sourceId IN ('local', 'yandex', 'smb')
+        """
+    )
+    suspend fun resetMetaWithoutCoords()
+
     @Query("UPDATE photos SET placeName = NULL, placeTries = 0 WHERE placeName = ''")
     suspend fun resetEmptyPlaces(): Int
 
@@ -318,7 +348,7 @@ interface PhotoDao {
     // ---------- Фильтр содержимого ----------
 
     /** Всё, что нужно фильтру, без тяжёлых полей. Решение принимает ContentFilter. */
-    @Query("SELECT id, sourceId, isVideo, durationMs, displayName, albumName, width, height, sizeBytes FROM photos")
+    @Query("SELECT id, enabled, sourceId, isVideo, durationMs, displayName, albumName, width, height, sizeBytes FROM photos")
     suspend fun filterRows(): List<FilterRow>
 
     @Query("UPDATE photos SET enabled = :enabled WHERE id IN (:ids)")

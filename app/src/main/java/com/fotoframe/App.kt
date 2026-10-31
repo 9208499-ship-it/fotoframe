@@ -45,7 +45,11 @@ class App : Application(), ImageLoaderFactory {
         set(value) {
             field = value
             uiVisible = value || startedActivities > 0
+            dreamActive.value = value
         }
+
+    /** То же, но с подпиской: окно приложения под заставкой должно встать. */
+    val dreamActive = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     @Volatile
     private var startedActivities = 0
@@ -105,6 +109,7 @@ class App : Application(), ImageLoaderFactory {
                     .putBoolean("places_v11", true)
                     .putBoolean("signals_v12", true)
                     .putBoolean("sources_v14", true)
+                    .putBoolean("geo_v15", true)
                     .apply()
                 return@launch
             }
@@ -168,6 +173,16 @@ class App : Application(), ImageLoaderFactory {
             if (!sp.getBoolean("dims_v10", false)) {
                 runCatching { dao.resetMetaWithoutDims() }
                     .onSuccess { sp.edit().putBoolean("dims_v10", true).apply() }
+            }
+            // geo_v15: координаты читаются и у снимков без пометок
+            // «север/восток», а места через OpenStreetMap — с точностью до
+            // посёлка. Снимки без координат перечитываются, а все места
+            // определяются заново. Идёт в фоне, порциями.
+            if (!sp.getBoolean("geo_v15", false)) {
+                runCatching {
+                    dao.resetMetaWithoutCoords()
+                    dao.resetPlaces()
+                }.onSuccess { sp.edit().putBoolean("geo_v15", true).apply() }
             }
             // places_v11: в подписи попадали названия на нечитаемых
             // письменностях — «อ.กะทู้» вместо «Пхукет». Сбрасываем

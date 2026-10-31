@@ -57,6 +57,7 @@ class PhotoPicker(private val dao: PhotoDao) {
 
         return when (settings.order) {
             PhotoOrder.NEWEST_FIRST -> pickStrictlyNewest(cooldown)
+            PhotoOrder.OLDEST_FIRST -> dao.oldestUnshown(cooldown) ?: dao.oldestUnshown(0)
             PhotoOrder.RANDOM -> pickWeighted(bias = 1.0, cooldown = cooldown)
             PhotoOrder.RANDOM_RECENT_FIRST -> pickWithFreshBoost(settings, cooldown)
         }

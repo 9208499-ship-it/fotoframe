@@ -7,6 +7,7 @@ import com.fotoframe.engine.rethrowIfCancelled
 import com.fotoframe.source.DeleteResult
 import com.fotoframe.source.MediaSource
 import com.fotoframe.source.RemoteItem
+import com.fotoframe.engine.tryOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -152,9 +153,12 @@ class YandexDiskSource(
 
     override suspend fun resolveDisplayUrl(photo: Photo): String =
         withContext(Dispatchers.IO) {
-            // Превью отдаётся мгновенно и весит в разы меньше исходника.
-            photo.thumbnailUrl?.let { return@withContext it }
-            downloadUrl(photo) ?: photo.uri
+            // Превью отдаётся мгновенно и весит в разы меньше исходника, но
+            // оно не крупнее 1920 точек и заметно пережато. Для большого
+            // экрана есть настройка «исходные файлы».
+            val originals = settings.settings.first().yandexOriginals
+            if (!originals) photo.thumbnailUrl?.let { return@withContext it }
+            tryOrNull { downloadUrl(photo) } ?: photo.thumbnailUrl ?: photo.uri
         }
 
     /**

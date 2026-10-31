@@ -49,6 +49,7 @@ import com.fotoframe.data.prefs.YANDEX_REFRESH_STEP
 import com.fotoframe.data.prefs.YANDEX_REFRESH_MAX
 import com.fotoframe.data.prefs.YANDEX_REFRESH_MIN
 import com.fotoframe.data.prefs.PhotoOrder
+import com.fotoframe.data.prefs.SettingsStore
 import com.fotoframe.data.prefs.SlideshowSettings
 import com.fotoframe.data.prefs.Transition
 import com.fotoframe.engine.PhotoPicker
@@ -99,6 +100,8 @@ fun SettingsScreen(
     onShowArtCaptionChange: (Boolean) -> Unit = {},
     onArtRussianChange: (Boolean) -> Unit = {},
     onMinVideoSecondsChange: (Int) -> Unit = {},
+    onExportSettings: (toStorage: Boolean) -> Unit = {},
+    onImportSettings: (fromStorage: Boolean) -> Unit = {},
     onMusicModeChange: (String) -> Unit = {},
     onMusicBrowse: () -> Unit = {},
     onMusicStreamUrlChange: (String) -> Unit = {},
@@ -143,6 +146,10 @@ fun SettingsScreen(
     onRemoveSource: (String) -> Unit = {},
     onDiagnostics: () -> Unit,
     onClose: () -> Unit,
+    /** Записать настройку. Для новых настроек — вместо отдельного обработчика на каждую. */
+    onEdit: (suspend SettingsStore.() -> Unit) -> Unit = {},
+    /** Открыть выбор папки на устройстве или флешке. */
+    onBrowseLocal: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var advanced by remember { mutableStateOf(false) }
@@ -305,6 +312,34 @@ fun SettingsScreen(
         }
 
         item {
+            RowCard {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Перенос настроек", color = Color.White, fontSize = 20.sp)
+                    Text(
+                        "Все настройки одним файлом — на другую приставку или планшет. На " +
+                            "хранилище файл кладётся в папку «_Фоторамка» в корне общей папки; " +
+                            "на новом устройстве достаточно ввести адрес и пароль NAS и нажать " +
+                            "«Загрузить». В файле есть пароль и токены — он для вашей сети.",
+                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = { onExportSettings(true) }) { Text("Сохранить на хранилище") }
+                        Button(onClick = { onImportSettings(true) }) { Text("Загрузить с хранилища") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = { onExportSettings(false) }) { Text("Сохранить в файл") }
+                        Button(onClick = { onImportSettings(false) }) { Text("Загрузить из файла") }
+                    }
+                    Text(
+                        "Файл — в папке приложения Android/data/com.fotoframe/files, переносится " +
+                            "командами adb pull и adb push.",
+                        color = Color.White.copy(alpha = 0.45f), fontSize = 13.sp
+                    )
+                }
+            }
+        }
+
+        item {
             MusicCard(
                 settings = settings,
                 nowPlaying = nowPlaying,
@@ -316,6 +351,56 @@ fun SettingsScreen(
                 onLoadFolders = onMusicFoldersLoad,
                 onDeviceFolder = onMusicDeviceFolderChange
             )
+        }
+
+        if (settings.musicMode != "off") {
+            item {
+                SwitchRow(
+                    "Музыка в экранной заставке",
+                    "Заставка включается сама, в том числе ночью, поэтому по умолчанию она без звука",
+                    settings.musicInScreensaver
+                ) { v -> onEdit { setMusicInScreensaver(v) } }
+            }
+            item {
+                SwitchRow(
+                    "Ночной режим музыки",
+                    if (settings.musicNight) {
+                        "С %02d:00 до %02d:00 — %s".format(
+                            settings.musicNightFrom, settings.musicNightTo,
+                            if (settings.musicNightVolume == 0) "музыка выключена"
+                            else "громкость ${settings.musicNightVolume}%"
+                        )
+                    } else "Тише или совсем без музыки в заданные часы",
+                    settings.musicNight
+                ) { v -> onEdit { setMusicNight(v) } }
+            }
+            if (settings.musicNight) {
+                item {
+                    StepperRow(
+                        title = "Ночь начинается",
+                        value = "%02d:00".format(settings.musicNightFrom),
+                        onPrev = { onEdit { setMusicNightFrom(settings.musicNightFrom - 1) } },
+                        onNext = { onEdit { setMusicNightFrom(settings.musicNightFrom + 1) } }
+                    )
+                }
+                item {
+                    StepperRow(
+                        title = "Ночь заканчивается",
+                        value = "%02d:00".format(settings.musicNightTo),
+                        onPrev = { onEdit { setMusicNightTo(settings.musicNightTo - 1) } },
+                        onNext = { onEdit { setMusicNightTo(settings.musicNightTo + 1) } }
+                    )
+                }
+                item {
+                    StepperRow(
+                        title = "Громкость ночью",
+                        caption = "0 — музыка ночью выключается и сама включается утром",
+                        value = if (settings.musicNightVolume == 0) "выкл" else "${settings.musicNightVolume}%",
+                        onPrev = { onEdit { setMusicNightVolume(settings.musicNightVolume - 5) } },
+                        onNext = { onEdit { setMusicNightVolume(settings.musicNightVolume + 5) } }
+                    )
+                }
+            }
         }
 
         item {
@@ -518,6 +603,21 @@ fun SettingsScreen(
                             "подчёркивания заменены пробелами",
                         settings.showFileName, onShowFileNameChange
                     )
+                    StepperRow(
+                        title = "Имя файла и подпись картины — с задержкой",
+                        caption = if (settings.captionDelaySeconds == 0) "Появляются сразу со сменой кадра"
+                        else "Появляются через ${settings.captionDelaySeconds} с — можно успеть угадать автора",
+                        value = if (settings.captionDelaySeconds == 0) "сразу" else "${settings.captionDelaySeconds} с",
+                        onPrev = { onEdit { setCaptionDelaySeconds(prevDelay(settings.captionDelaySeconds)) } },
+                        onNext = { onEdit { setCaptionDelaySeconds(nextDelay(settings.captionDelaySeconds)) } }
+                    )
+                    StepperRow(
+                        title = "Размер надписей",
+                        caption = "Часы, дата, погода и подписи. Крупнее — для большого экрана или если смотрят издалека",
+                        value = "${(settings.textScale * 100).roundToInt()}%",
+                        onPrev = { onEdit { setTextScale(((settings.textScale * 10).roundToInt() - 1) / 10f) } },
+                        onNext = { onEdit { setTextScale(((settings.textScale * 10).roundToInt() + 1) / 10f) } }
+                    )
 
                     SectionTitle("Экран")
 
@@ -526,6 +626,30 @@ fun SettingsScreen(
                         "Иначе приставка уснёт по своему таймеру",
                         settings.keepScreenOn, onKeepScreenOnChange
                     )
+                    AutostartCard(settings.autostart) { v -> onEdit { setAutostart(v) } }
+                    PinCard(settings.settingsPin) { pin -> onEdit { setSettingsPin(pin) } }
+
+                    SectionTitle("Устройство и флешка")
+
+                    RowCard {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                "Папка: " + settings.localFolderName.ifBlank { "все снимки устройства и флешки" },
+                                color = Color.White, fontSize = 20.sp
+                            )
+                            Text(
+                                "Папки — как их видит галерея Android: по имени папки со снимками. " +
+                                    "После выбора список обновится сам.",
+                                color = Color.White.copy(alpha = 0.55f), fontSize = 15.sp
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Button(onClick = onBrowseLocal) { Text("Выбрать папку") }
+                                if (settings.localFolder.isNotBlank()) {
+                                    Button(onClick = { onEdit { setLocalFolder("", "") } }) { Text("Все снимки") }
+                                }
+                            }
+                        }
+                    }
 
                     SectionTitle("Яндекс.Диск")
 
@@ -552,6 +676,24 @@ fun SettingsScreen(
                                 if (token.isNotBlank()) {
                                     Button(onClick = { token = "" }) { Text("Очистить") }
                                 }
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Исходные файлы вместо превью", color = Color.White, fontSize = 18.sp)
+                                    Text(
+                                        "Превью Диска не крупнее 1920 точек и пережато — на большом экране " +
+                                            "это видно. Исходники чётче, но тяжелее для сети",
+                                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                                    )
+                                }
+                                Switch(
+                                    checked = settings.yandexOriginals,
+                                    onCheckedChange = { v -> onEdit { setYandexOriginals(v) } }
+                                )
                             }
                             Text(
                                 "Папка: " + settings.yandexFolder.ifBlank { "весь Диск" },
@@ -1486,10 +1628,102 @@ private fun SwitchRow(
     }
 }
 
+/**
+ * Автозапуск. С Android 10 открыть окно после включения можно только с
+ * правом «поверх других приложений» — проверяем и объясняем, как выдать.
+ */
+@Composable
+private fun AutostartCard(enabled: Boolean, onChange: (Boolean) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val needsOverlay = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q &&
+        !android.provider.Settings.canDrawOverlays(context)
+    RowCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Запускать при включении", color = Color.White, fontSize = 20.sp)
+                    Text(
+                        "Рамка открывается сама после включения или перезагрузки. Часть прошивок " +
+                            "это запрещает — тогда выберите рамку экранной заставкой",
+                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
+                    )
+                }
+                Switch(checked = enabled, onCheckedChange = onChange)
+            }
+            if (enabled && needsOverlay) {
+                Text(
+                    "Нужно право «Поверх других приложений» — без него Android не даст рамке " +
+                        "открыться после включения. Выдайте его кнопкой ниже, а если на приставке " +
+                        "такого пункта нет — с компьютера:\n" +
+                        "adb shell appops set com.fotoframe SYSTEM_ALERT_WINDOW allow",
+                    color = Color(0xFFFFCC80), fontSize = 14.sp
+                )
+                Button(onClick = {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse("package:" + context.packageName)
+                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "На этой приставке такого экрана нет — выдайте право командой adb",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }) { Text("Выдать право") }
+            }
+        }
+    }
+}
+
+/** Шаги задержки подписи, секунды. */
+private val DELAY_STEPS = listOf(0, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+
+private fun nextDelay(v: Int): Int = DELAY_STEPS.firstOrNull { it > v } ?: DELAY_STEPS.last()
+private fun prevDelay(v: Int): Int = DELAY_STEPS.lastOrNull { it < v } ?: 0
+
+/**
+ * ПИН-код на вход в настройки — для рамки на стене или планшета, до
+ * которого дотягиваются дети. Цифры с пульта или экранной клавиатуры.
+ */
+@Composable
+private fun PinCard(pin: String, onSave: (String) -> Unit) {
+    var draft by remember(pin) { mutableStateOf("") }
+    RowCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("ПИН-код на настройки", color = Color.White, fontSize = 20.sp)
+            Text(
+                if (pin.isBlank()) "Не задан: настройки открываются без кода"
+                else "Задан. Без него настройки не откроются. Забыли — переустановите приложение " +
+                    "или сбросьте его данные в настройках Android",
+                color = Color.White.copy(alpha = 0.55f), fontSize = 15.sp
+            )
+            LabeledField("Новый код, от 4 до 8 цифр", "", draft, isPassword = true) { v ->
+                draft = v.filter { it.isDigit() }.take(8)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { onSave(draft) }, enabled = draft.length >= 4) {
+                    Text(if (pin.isBlank()) "Задать код" else "Сменить код")
+                }
+                if (pin.isNotBlank()) {
+                    Button(onClick = { onSave("") }) { Text("Снять код") }
+                }
+            }
+        }
+    }
+}
+
 private fun orderLabel(order: PhotoOrder): String = when (order) {
     PhotoOrder.RANDOM -> "Случайно"
     PhotoOrder.RANDOM_RECENT_FIRST -> "Случайно, новые чаще"
     PhotoOrder.NEWEST_FIRST -> "От новых к старым"
+    PhotoOrder.OLDEST_FIRST -> "От старых к новым"
 }
 
 private fun fitLabel(mode: FitMode): String = when (mode) {

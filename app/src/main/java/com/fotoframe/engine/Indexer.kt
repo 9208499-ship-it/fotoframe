@@ -223,7 +223,7 @@ class IndexWorker(
         if (startedAt - settings.lastIndexAt() >= MIN_GAP_MS) {
             val results = ArrayList<String>()
 
-            results += "local: " + indexer.index(app.sources.local, "*").describe()
+            results += "local: " + indexer.index(app.sources.local, current.localFolder.ifBlank { "*" }).describe()
 
             if (current.yandexToken != null) {
                 results += "yandex: " + indexer.index(app.sources.yandex, current.yandexFolder).describe()

@@ -19,6 +19,12 @@ import java.io.File
  * перед каждой записью сторож проверяет, что после неё останется
  * [KEEP_FREE]; если нет — удаляет самые давние файлы из всех кэшей рамки
  * ([ensureRoom]).
+ *
+ * Свежие файлы — моложе [PROTECT_MS] — не удаляются никогда: это кадр на
+ * экране и кадры очереди. Раньше при нехватке места сторож стирал всё
+ * подряд, включая только что скачанный следующий кадр, и тот уже не
+ * открывался: «не удалось загрузить» по всем источникам разом, пока место
+ * не освободится, — на практике до перезагрузки приставки.
  */
 object StorageGuard {
 
@@ -50,11 +56,15 @@ object StorageGuard {
     @Synchronized
     fun ensureRoom(context: Context, need: Long = 20L * 1024 * 1024) {
         val root = context.cacheDir
-        if (root.usableSpace - need >= KEEP_FREE) return
+        if (root.usableSpace - need >= KEEP_FREE) {
+            lowSpaceMb = -1
+            return
+        }
 
         val files = DIRS.map { File(root, it) }
             // Журнал кэша изображений не трогаем — без него кэш пересобирается целиком.
             .flatMap { d -> d.walkTopDown().filter { it.isFile && !it.name.startsWith("journal") }.toList() }
+            .filterNot { isProtected(it) }
             .sortedBy { it.lastModified() }
 
         var freed = 0L
@@ -67,13 +77,33 @@ object StorageGuard {
                 removed++
             }
         }
-        Log.w(
-            TAG,
-            "Мало места: освобождено %.0f МБ (%d файлов), свободно %.0f МБ".format(
-                freed / 1048576.0, removed, root.usableSpace / 1048576.0
+        val free = root.usableSpace
+        lowSpaceMb = if (free - need < KEEP_FREE) free / 1048576 else -1
+        if (removed > 0 || lowSpaceMb >= 0) {
+            Log.w(
+                TAG,
+                "Мало места: освобождено %.0f МБ (%d файлов), свободно %.0f МБ".format(
+                    freed / 1048576.0, removed, free / 1048576.0
+                )
             )
-        )
+        }
     }
+
+    /**
+     * Свободно на устройстве, МБ, если места не хватает даже после чистки
+     * кэша: его заняло что-то другое. -1 — места достаточно. Показ пишет
+     * это в сообщение об ошибке — иначе причину не угадать.
+     */
+    @Volatile
+    var lowSpaceMb: Long = -1
+        private set
+
+    /** Файл свежий — на экране или в очереди, удалять нельзя. */
+    fun isProtected(f: File): Boolean =
+        System.currentTimeMillis() - f.lastModified() < PROTECT_MS
+
+    /** Столько живёт защита свежего файла: с запасом на очередь из пяти кадров при долгом интервале. */
+    private const val PROTECT_MS = 30L * 60 * 1000
 
     /** Нижняя граница предела — меньше кэш бессмыслен. */
     private const val MIN_LIMIT = 30L * 1024 * 1024

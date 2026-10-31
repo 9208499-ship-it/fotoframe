@@ -20,7 +20,10 @@ enum class PhotoOrder {
     RANDOM_RECENT_FIRST,
 
     /** Строго от новых к старым. */
-    NEWEST_FIRST
+    NEWEST_FIRST,
+
+    /** Строго от старых к новым — семейная хроника по порядку. */
+    OLDEST_FIRST
 }
 
 enum class Transition {
@@ -284,7 +287,51 @@ data class SlideshowSettings(
     val smbPassword: String = "",
     val smbDomain: String = "",
     /** Подпапка внутри шары. Пусто — вся шара целиком. */
-    val smbFolder: String = ""
+    val smbFolder: String = "",
+
+    // ---------- Добавлено в 1.1 ----------
+
+    /**
+     * Папка на устройстве или флешке — идентификатор альбома (BUCKET_ID)
+     * системной медиатеки. Пусто — все снимки устройства.
+     */
+    val localFolder: String = "",
+
+    /** Название выбранной папки устройства — для показа в настройках. */
+    val localFolderName: String = "",
+
+    /**
+     * Через сколько секунд после смены кадра появляются имя файла и подпись
+     * картины. 0 — сразу. Задержка нужна, чтобы успеть угадать автора.
+     */
+    val captionDelaySeconds: Int = 0,
+
+    /** Масштаб надписей поверх кадра: часы, дата, подписи. 1.0 — как было. */
+    val textScale: Float = 1f,
+
+    /** Музыка и в экранной заставке. По умолчанию нет: заставка включается сама, в том числе ночью. */
+    val musicInScreensaver: Boolean = false,
+
+    /** Ночной режим музыки: с [musicNightFrom] до [musicNightTo] часов громкость [musicNightVolume]. */
+    val musicNight: Boolean = false,
+    val musicNightFrom: Int = 23,
+    val musicNightTo: Int = 7,
+
+    /** Громкость ночью, 0..100. 0 — музыка ночью выключена. */
+    val musicNightVolume: Int = 0,
+
+    /** ПИН-код на вход в настройки. Пусто — без кода. */
+    val settingsPin: String = "",
+
+    /** Запускать рамку после включения устройства. */
+    val autostart: Boolean = false,
+
+    /**
+     * Яндекс.Диск: показывать исходные файлы, а не превью. Превью у Диска
+     * не крупнее 1920 точек по ширине и заметно пережато — на 4K-экране
+     * это видно. Исходник весит больше и дольше идёт по сети.
+     */
+    val yandexOriginals: Boolean = false
 )
 
 private val Context.dataStore by preferencesDataStore("settings")
@@ -355,6 +402,18 @@ class SettingsStore(private val context: Context) {
         val smbPassword = stringPreferencesKey("smb_password")
         val smbDomain = stringPreferencesKey("smb_domain")
         val smbFolder = stringPreferencesKey("smb_folder")
+        val localFolder = stringPreferencesKey("local_folder")
+        val localFolderName = stringPreferencesKey("local_folder_name")
+        val captionDelaySeconds = intPreferencesKey("caption_delay_seconds")
+        val textScale = floatPreferencesKey("text_scale")
+        val musicInScreensaver = booleanPreferencesKey("music_in_screensaver")
+        val musicNight = booleanPreferencesKey("music_night")
+        val musicNightFrom = intPreferencesKey("music_night_from")
+        val musicNightTo = intPreferencesKey("music_night_to")
+        val musicNightVolume = intPreferencesKey("music_night_volume")
+        val settingsPin = stringPreferencesKey("settings_pin")
+        val autostart = booleanPreferencesKey("autostart")
+        val yandexOriginals = booleanPreferencesKey("yandex_originals")
 
         /** Служебное, в SlideshowSettings не входит: показ на это не реагирует. */
         val lastIndexAt = longPreferencesKey("last_index_at")
@@ -428,7 +487,19 @@ class SettingsStore(private val context: Context) {
             smbUser = p[Keys.smbUser] ?: defaults.smbUser,
             smbPassword = p[Keys.smbPassword] ?: defaults.smbPassword,
             smbDomain = p[Keys.smbDomain] ?: defaults.smbDomain,
-            smbFolder = p[Keys.smbFolder] ?: defaults.smbFolder
+            smbFolder = p[Keys.smbFolder] ?: defaults.smbFolder,
+            localFolder = p[Keys.localFolder] ?: defaults.localFolder,
+            localFolderName = p[Keys.localFolderName] ?: defaults.localFolderName,
+            captionDelaySeconds = p[Keys.captionDelaySeconds] ?: defaults.captionDelaySeconds,
+            textScale = p[Keys.textScale] ?: defaults.textScale,
+            musicInScreensaver = p[Keys.musicInScreensaver] ?: defaults.musicInScreensaver,
+            musicNight = p[Keys.musicNight] ?: defaults.musicNight,
+            musicNightFrom = p[Keys.musicNightFrom] ?: defaults.musicNightFrom,
+            musicNightTo = p[Keys.musicNightTo] ?: defaults.musicNightTo,
+            musicNightVolume = p[Keys.musicNightVolume] ?: defaults.musicNightVolume,
+            settingsPin = p[Keys.settingsPin] ?: defaults.settingsPin,
+            autostart = p[Keys.autostart] ?: defaults.autostart,
+            yandexOriginals = p[Keys.yandexOriginals] ?: defaults.yandexOriginals
         )
     }
 
@@ -503,6 +574,21 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setSmbFolder(path: String) = edit { it[Keys.smbFolder] = path }
 
+    suspend fun setLocalFolder(id: String, name: String) = edit {
+        it[Keys.localFolder] = id
+        it[Keys.localFolderName] = name
+    }
+    suspend fun setCaptionDelaySeconds(v: Int) = edit { it[Keys.captionDelaySeconds] = v.coerceIn(0, 120) }
+    suspend fun setTextScale(v: Float) = edit { it[Keys.textScale] = v.coerceIn(TEXT_SCALE_MIN, TEXT_SCALE_MAX) }
+    suspend fun setMusicInScreensaver(v: Boolean) = edit { it[Keys.musicInScreensaver] = v }
+    suspend fun setMusicNight(v: Boolean) = edit { it[Keys.musicNight] = v }
+    suspend fun setMusicNightFrom(h: Int) = edit { it[Keys.musicNightFrom] = Math.floorMod(h, 24) }
+    suspend fun setMusicNightTo(h: Int) = edit { it[Keys.musicNightTo] = Math.floorMod(h, 24) }
+    suspend fun setMusicNightVolume(v: Int) = edit { it[Keys.musicNightVolume] = v.coerceIn(0, 100) }
+    suspend fun setSettingsPin(v: String) = edit { it[Keys.settingsPin] = v.filter { c -> c.isDigit() }.take(8) }
+    suspend fun setAutostart(v: Boolean) = edit { it[Keys.autostart] = v }
+    suspend fun setYandexOriginals(v: Boolean) = edit { it[Keys.yandexOriginals] = v }
+
     suspend fun setSmb(host: String, share: String, user: String, password: String, folder: String) =
         edit {
             it[Keys.smbHost] = host.trim()
@@ -529,6 +615,82 @@ class SettingsStore(private val context: Context) {
     suspend fun setIndexedRoot(sourceId: String, root: String) =
         edit { it[stringPreferencesKey("indexed_root_$sourceId")] = root }
 
+    // ---------- Перенос настроек ----------
+
+    /**
+     * Все настройки одной строкой JSON — для переноса на другое устройство.
+     * Без перечисления полей: берутся все ключи хранилища как есть, с их
+     * типами, так что добавленная позже настройка переносится сама.
+     * Внутри — и пароль от NAS, и токены: это полный снимок, хранить его
+     * стоит там, где он доступен только вам.
+     */
+    suspend fun exportJson(): String {
+        val p = context.dataStore.data.first()
+        val arr = kotlinx.serialization.json.buildJsonArray {
+            for ((key, value) in p.asMap()) {
+                val type = when (value) {
+                    is Boolean -> "bool"
+                    is Int -> "int"
+                    is Long -> "long"
+                    is Float -> "float"
+                    is Double -> "double"
+                    is String -> "string"
+                    else -> continue
+                }
+                add(kotlinx.serialization.json.buildJsonObject {
+                    put("k", kotlinx.serialization.json.JsonPrimitive(key.name))
+                    put("t", kotlinx.serialization.json.JsonPrimitive(type))
+                    put("v", kotlinx.serialization.json.JsonPrimitive(value.toString()))
+                })
+            }
+        }
+        val root = kotlinx.serialization.json.buildJsonObject {
+            put("app", kotlinx.serialization.json.JsonPrimitive("FotoFrame"))
+            put("format", kotlinx.serialization.json.JsonPrimitive(1))
+            put("savedAt", kotlinx.serialization.json.JsonPrimitive(System.currentTimeMillis()))
+            put("settings", arr)
+        }
+        return root.toString()
+    }
+
+    /**
+     * Настройки из JSON от [exportJson]. Служебные отметки обходов не
+     * переносятся: у каждого устройства свой индекс. Возвращает число
+     * применённых настроек; бросает исключение, если это не наш файл.
+     */
+    suspend fun importJson(json: String): Int {
+        val root = kotlinx.serialization.json.Json.parseToJsonElement(json)
+            as? kotlinx.serialization.json.JsonObject ?: throw IllegalArgumentException("не JSON-объект")
+        if ((root["app"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "FotoFrame") {
+            throw IllegalArgumentException("это не файл настроек FotoFrame")
+        }
+        val arr = root["settings"] as? kotlinx.serialization.json.JsonArray
+            ?: throw IllegalArgumentException("в файле нет настроек")
+
+        var applied = 0
+        context.dataStore.edit { prefs ->
+            for (el in arr) {
+                val o = el as? kotlinx.serialization.json.JsonObject ?: continue
+                fun s(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                val name = s("k") ?: continue
+                val v = s("v") ?: continue
+                // Отметки обходов и выбранные корни индекса — не настройки.
+                if (name.startsWith("last_index") || name.startsWith("indexed_root_")) continue
+                when (s("t")) {
+                    "bool" -> prefs[booleanPreferencesKey(name)] = v.toBoolean()
+                    "int" -> prefs[intPreferencesKey(name)] = v.toIntOrNull() ?: continue
+                    "long" -> prefs[androidx.datastore.preferences.core.longPreferencesKey(name)] = v.toLongOrNull() ?: continue
+                    "float" -> prefs[floatPreferencesKey(name)] = v.toFloatOrNull() ?: continue
+                    "double" -> prefs[androidx.datastore.preferences.core.doublePreferencesKey(name)] = v.toDoubleOrNull() ?: continue
+                    "string" -> prefs[stringPreferencesKey(name)] = v
+                    else -> continue
+                }
+                applied++
+            }
+        }
+        return applied
+    }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.dataStore.edit(block)
     }
@@ -538,6 +700,21 @@ class SettingsStore(private val context: Context) {
 const val YANDEX_REFRESH_MIN = 30
 const val YANDEX_REFRESH_MAX = 360
 const val YANDEX_REFRESH_STEP = 30
+
+/** Границы масштаба надписей. */
+const val TEXT_SCALE_MIN = 0.7f
+const val TEXT_SCALE_MAX = 2f
+
+/**
+ * Громкость музыки сейчас, с учётом ночного режима. Окно может переходить
+ * через полночь: с 23 до 7 — это и 23:30, и 03:00.
+ */
+fun SlideshowSettings.musicVolumeAt(hour: Int): Int {
+    if (!musicNight || musicNightFrom == musicNightTo) return musicVolume
+    val night = if (musicNightFrom < musicNightTo) hour in musicNightFrom until musicNightTo
+    else hour >= musicNightFrom || hour < musicNightTo
+    return if (night) musicNightVolume else musicVolume
+}
 
 /** Включённые в режиме картин музеи — по идентификаторам источников. */
 fun SlideshowSettings.enabledMuseums(): Set<String> = buildSet {

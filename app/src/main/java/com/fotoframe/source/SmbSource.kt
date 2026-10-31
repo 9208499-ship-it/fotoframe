@@ -656,6 +656,38 @@ class SmbSource(
         }
     }
 
+    /**
+     * Записать небольшой файл в служебную папку рамки на хранилище
+     * ([FRAME_DIR] в корне общей папки). Для переноса настроек.
+     */
+    suspend fun writeFrameFile(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
+        val disk = share() ?: return@withContext false
+        acquire()
+        try {
+            if (!disk.folderExists(FRAME_DIR)) disk.mkdir(FRAME_DIR)
+            disk.openFile(
+                "$FRAME_DIR\\$name",
+                EnumSet.of(AccessMask.GENERIC_WRITE),
+                null,
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                null
+            ).use { f -> f.write(bytes, 0) }
+            true
+        } catch (e: Throwable) {
+            e.rethrowIfCancelled()
+            noteFailure(e)
+            lastError = describe(e)
+            Log.w(TAG, "Не удалось записать '$name' на хранилище: ${e.message}")
+            false
+        } finally {
+            release()
+        }
+    }
+
+    /** Прочитать файл из служебной папки рамки; null — нет или не удалось. */
+    suspend fun readFrameFile(name: String): ByteArray? = readFile("$FRAME_DIR\\$name")
+
     suspend fun readFile(path: String): ByteArray? =
         withContext(Dispatchers.IO) {
             val disk = share() ?: return@withContext null
@@ -694,6 +726,8 @@ class SmbSource(
 
         for (f in files.sortedBy { it.lastModified() }) {
             if (total <= limit) break
+            // Свежие — кадр на экране и очередь: их не трогаем.
+            if (com.fotoframe.engine.StorageGuard.isProtected(f)) continue
             total -= f.length()
             f.delete()
         }
@@ -764,6 +798,12 @@ class SmbSource(
 
         /** Корзина рамки в корне шары. Видна с компьютера, файл можно вернуть. */
         const val TRASH_DIR = "_Корзина фоторамки"
+
+        /** Служебная папка рамки в корне общей папки: настройки и прочее. */
+        const val FRAME_DIR = "_Фоторамка"
+
+        /** Имя файла настроек на хранилище и в папке приложения. */
+        const val SETTINGS_FILE = "fotoframe-settings.json"
 
         private const val TAG = "SmbSource"
         private const val BATCH = 300

@@ -94,8 +94,9 @@ class FrameDreamService : DreamService(), LifecycleOwner, SavedStateRegistryOwne
         (application as? App)?.dreamVisible = true
         vm?.let {
             it.reindexIfStale(STARTUP_REINDEX_AFTER_MS)
-            // Без музыки: заставка включается сама, в том числе ночью.
-            it.start(withMusic = false)
+            // Музыка в заставке — только если включена отдельной настройкой:
+            // заставка включается сама, в том числе ночью.
+            it.start(screensaver = true)
         }
     }
 

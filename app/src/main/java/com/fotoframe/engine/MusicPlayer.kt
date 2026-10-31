@@ -83,6 +83,12 @@ class MusicPlayer(
         buildJob = scope.launch {
             when (s.musicMode) {
                 "stream" -> {
+                    if (s.musicStreamUrl.isBlank()) {
+                        // Без адреса играть нечего — и крутить переподключения незачем.
+                        nowPlaying = "Адрес потока не задан"
+                        currentKey = null
+                        return@launch
+                    }
                     stationTitle = MusicPlayer.PRESETS.firstOrNull { it.third == s.musicStreamUrl }?.first
                         ?: s.musicStreamUrl.substringAfter("//").substringBefore('/')
                     playUri(Uri.parse(s.musicStreamUrl), stationTitle!!)
@@ -91,7 +97,12 @@ class MusicPlayer(
                     playlist = tryOrNull { buildPlaylist(s) }.orEmpty().shuffled()
                     if (playlist.isEmpty()) {
                         Log.w(TAG, "Музыка: список пуст (${s.musicMode})")
-                        nowPlaying = null
+                        // Причину — на экран, в строку «Сейчас:», а не только в лог.
+                        nowPlaying = if (s.musicMode == "device") {
+                            "Музыки не найдено: нет доступа к аудио или папка пуста"
+                        } else {
+                            "В папке нет аудиофайлов"
+                        }
                         return@launch
                     }
                     Log.i(TAG, "Музыка: ${playlist.size} треков (${s.musicMode})")

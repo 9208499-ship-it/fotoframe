@@ -5,6 +5,7 @@ import android.util.Log
 import com.fotoframe.data.db.Photo
 import com.fotoframe.data.db.PhotoDao
 import com.fotoframe.engine.rethrowIfCancelled
+import com.fotoframe.engine.tryOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -47,8 +48,17 @@ abstract class MuseumSource(
 
     protected val translator = ArtTranslator(http)
 
-    /** Что музей знает о картине. */
-    protected class Info(val imageUrl: String, val caption: String?, val captionRu: String?)
+    /**
+     * Что музей знает о картине. [fallbacks] — запасные адреса того же
+     * изображения: меньшего размера или исходник. Пробуются по очереди,
+     * если основной не отдался.
+     */
+    protected class Info(
+        val imageUrl: String,
+        val caption: String?,
+        val captionRu: String?,
+        val fallbacks: List<String> = emptyList()
+    )
 
     override suspend fun isReady(): Boolean = true
 
@@ -65,9 +75,13 @@ abstract class MuseumSource(
         if (file.length() > 0) {
             file.setLastModified(System.currentTimeMillis())
             // Картина скачана раньше, чем появился перевод, — дописать его.
+            // И починить подпись, если в ней осталась ссылка вместо автора.
+            repairCaption(photo)
             if (photo.captionRu == null) {
-                runCatching { details(photo)?.captionRu }.getOrNull()?.let {
-                    runCatching { daoProvider().setCaptionRu(photo.id, it) }
+                // tryOrNull, не runCatching: runCatching проглатывает и отмену,
+                // и задача, которой велели остановиться, доделывала бы работу.
+                tryOrNull { details(photo)?.captionRu }?.let {
+                    tryOrNull { daoProvider().setCaptionRu(photo.id, it) }
                 }
             }
             return@withContext "file://${file.absolutePath}"
@@ -77,39 +91,82 @@ abstract class MuseumSource(
             ?: run {
                 // Не в общественном достоянии или без картинки — в показ
                 // больше не просится.
-                runCatching { daoProvider().deleteById(photo.id) }
+                tryOrNull { daoProvider().deleteById(photo.id) }
                 throw IllegalStateException("Картина ${photo.remoteId} недоступна")
             }
         val imageUrl = info.imageUrl
 
         if (info.caption != null && info.caption != photo.displayName) {
-            runCatching { daoProvider().setDisplayName(photo.id, info.caption) }
+            tryOrNull { daoProvider().setDisplayName(photo.id, info.caption) }
         }
-        info.captionRu?.let { runCatching { daoProvider().setCaptionRu(photo.id, it) } }
+        info.captionRu?.let { tryOrNull { daoProvider().setCaptionRu(photo.id, it) } }
 
         com.fotoframe.engine.StorageGuard.ensureRoom(appContext)
+        // Основной адрес, потом запасные. Викисклад и музеи временами
+        // отвечают 429 («слишком часто») или 5xx — такой адрес пробуется
+        // второй раз после паузы. Прежде одна неудача означала пропуск
+        // картины, и пропускалась каждая пятая-шестая.
+        val urls = (listOf(imageUrl) + info.fallbacks).distinct()
+        var lastError: Throwable? = null
+        for (url in urls) {
+            for (attempt in 0..1) {
+                val code = try {
+                    download(url, file)
+                } catch (e: Throwable) {
+                    e.rethrowIfCancelled()
+                    lastError = e
+                    -1
+                }
+                if (code == 200) {
+                    prune()
+                    return@withContext "file://${file.absolutePath}"
+                }
+                if (code > 0) lastError = IllegalStateException("HTTP $code")
+                // Повтор имеет смысл только при перегрузке сервера или обрыве.
+                val transient = code == 429 || code >= 500 || code == -1
+                if (!transient || attempt == 1) break
+                kotlinx.coroutines.delay(RETRY_PAUSE_MS)
+            }
+        }
+        Log.w(TAG, "$museum: не удалось скачать картину ${photo.remoteId}: ${lastError?.message}")
+        throw lastError ?: IllegalStateException("картина не скачалась")
+    }
+
+    /** Скачать [url] в [file]. Возвращает код ответа; 200 — файл на месте. */
+    private fun download(url: String, file: File): Int {
         val tmp = File.createTempFile("dl_", ".part", cacheDir)
         try {
             http.newCall(
-                Request.Builder().url(imageUrl)
+                Request.Builder().url(url)
                     .header("User-Agent", USER_AGENT)
                     .build()
             ).execute().use { resp ->
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
-                resp.body?.byteStream()?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                    ?: throw IllegalStateException("пустой ответ")
+                if (!resp.isSuccessful) return resp.code
+                val body = resp.body ?: return -1
+                body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
             }
+            if (tmp.length() == 0L) return -1
             if (!tmp.renameTo(file)) {
                 tmp.copyTo(file, overwrite = true)
-                tmp.delete()
             }
-            prune()
-            "file://${file.absolutePath}"
-        } catch (e: Throwable) {
+            return 200
+        } finally {
             tmp.delete()
-            e.rethrowIfCancelled()
-            Log.w(TAG, "$museum: не удалось скачать картину ${photo.remoteId}: ${e.message}")
-            throw e
+        }
+    }
+
+    /**
+     * Подпись, записанная в индекс прошлыми версиями, могла содержать адрес
+     * вместо автора: Викиданные так обозначают «автор неизвестен». Чиним
+     * при показе — переобходить музей ради этого не нужно.
+     */
+    private suspend fun repairCaption(photo: Photo) {
+        if (photo.displayName.contains("://")) {
+            tryOrNull { daoProvider().setDisplayName(photo.id, stripLinks(photo.displayName).ifBlank { museum }) }
+        }
+        val ru = photo.captionRu
+        if (ru != null && ru.contains("://")) {
+            tryOrNull { daoProvider().setCaptionRu(photo.id, stripLinks(ru).ifBlank { museum }) }
         }
     }
 
@@ -120,6 +177,8 @@ abstract class MuseumSource(
         var total = files.sumOf { it.length() }
         for (f in files) {
             if (total <= limit) break
+            // Свежие — кадр на экране и очередь: их не трогаем.
+            if (com.fotoframe.engine.StorageGuard.isProtected(f)) continue
             total -= f.length()
             f.delete()
         }
@@ -147,6 +206,19 @@ abstract class MuseumSource(
 
     protected companion object {
         const val TAG = "Museum"
+        const val RETRY_PAUSE_MS = 2_000L
+
+        /** «http://www.wikidata.org/.well-known/genid/… — Пейзаж, 1880» → «Пейзаж, 1880». */
+        fun stripLinks(caption: String): String =
+            caption.replace(Regex("https?://\\S+"), "")
+                .replace(Regex("^[\\s—,]+"), "")
+                .replace(Regex("\\s+—\\s+(?=,|$)"), "")
+                .replace(Regex("\\s{2,}"), " ")
+                .trim()
+
+        /** Метка из Викиданных годится в подпись: не номер записи и не ссылка «значение неизвестно». */
+        fun usableLabel(label: String?): String? =
+            label?.trim()?.takeUnless { it.isEmpty() || it.matches(Regex("Q\\d+")) || it.contains("://") }
         const val USER_AGENT = "FotoFrame (Android TV photo frame; github.com/9208499-ship-it/fotoframe)"
         const val CACHE_LIMIT = 400L * 1024 * 1024
     }
@@ -191,6 +263,9 @@ class MetMuseumSource(context: Context, http: OkHttpClient, dao: () -> PhotoDao)
         // Оригинал бывает на десятки мегапикселей — для телевизора
         // берём его, а если нет — уменьшенную версию.
         val image = o.str("primaryImage") ?: o.str("primaryImageSmall") ?: return@withContext null
+        // Исходник у Метрополитена бывает на десятки мегабайт и временами не
+        // отдаётся; уменьшенная копия — запасной вариант.
+        val small = listOfNotNull(o.str("primaryImageSmall"))
         val artist = o.str("artistDisplayName")
         val title = o.str("title")
         val date = o.str("objectDate")
@@ -201,7 +276,7 @@ class MetMuseumSource(context: Context, http: OkHttpClient, dao: () -> PhotoDao)
                 ArtTranslator.qid(o.str("artistWikidata_URL"))
             )
         }.getOrNull()
-        Info(image, caption(artist, title, date), ru)
+        Info(image, caption(artist, title, date), ru, small)
     }
 
     private companion object {
@@ -344,8 +419,10 @@ class WikidataMuseumSource(
                 val q = v("p")?.substringAfterLast('/') ?: continue
                 if (!seen.add(q)) continue
                 val img = v("img")?.replaceFirst("http://", "https://") ?: continue
-                val title = v("pLabel")?.takeUnless { it.matches(Regex("Q\\d+")) }
-                val artist = v("creatorLabel")?.takeUnless { it.matches(Regex("Q\\d+")) }
+                // «Автор неизвестен» Викиданные отдают ссылкой на пустой узел —
+                // она и показывалась вместо автора.
+                val title = usableLabel(v("pLabel"))
+                val artist = usableLabel(v("creatorLabel"))
                 val year = v("date")?.let { Regex("^-?\\d{3,4}").find(it.trimStart('+'))?.value }
                 items += RemoteItem(
                     remoteId = q,
@@ -369,12 +446,16 @@ class WikidataMuseumSource(
      */
     override suspend fun details(photo: Photo): Info? {
         val url = photo.uri.takeIf { it.startsWith("http") } ?: return null
-        val sized = if ("?" in url) "$url&width=$WIDTH" else "$url?width=$WIDTH"
-        // Подпись уже по-русски — из Викиданных.
-        return Info(sized, null, photo.displayName)
+        fun sized(w: Int) = if ("?" in url) "$url&width=$w" else "$url?width=$w"
+        // Подпись уже по-русски — из Викиданных. Запасные адреса: копия
+        // поменьше и исходник — на случай, если снимок уже 1920 точек и
+        // уменьшенной копии у Викисклада нет.
+        val caption = stripLinks(photo.displayName).ifBlank { museum }
+        return Info(sized(WIDTH), caption, caption, listOf(sized(WIDTH_SMALL), url))
     }
 
     private companion object {
         const val WIDTH = 1920
+        const val WIDTH_SMALL = 1280
     }
 }

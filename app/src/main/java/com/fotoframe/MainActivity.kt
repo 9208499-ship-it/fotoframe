@@ -40,6 +40,14 @@ class MainActivity : ComponentActivity() {
     // обработчик кнопок пульта живёт вне композиции и должен уметь
     // открывать настройки.
     private var showSettings by mutableStateOf(false)
+
+    /** Ждём ПИН-код перед настройками. */
+    private var pinAsk by mutableStateOf(false)
+
+    /** Открыть настройки — через ПИН-код, если он задан. */
+    private fun openSettings() {
+        if (vm.state.value.settings.settingsPin.isBlank()) showSettings = true else pinAsk = true
+    }
     private var status by mutableStateOf<String?>(null)
 
     /**
@@ -159,8 +167,11 @@ class MainActivity : ComponentActivity() {
                                     when (browseState.sourceId) {
                                         "yandex" -> store.setYandexFolder(chosen)
                                         "smb" -> store.setSmbFolder(chosen)
+                                        // Корень списка — это «все снимки».
+                                        "local" -> store.setLocalFolder(chosen, if (chosen.isBlank()) "" else browseState.pathName)
                                     }
-                                    status = "Папка выбрана. Запустите обновление списка."
+                                    status = if (browseState.sourceId == "local") "Папка выбрана, список обновляется."
+                                    else "Папка выбрана. Запустите обновление списка."
                                 }
                             }
                             vm.closeBrowser()
@@ -235,6 +246,14 @@ class MainActivity : ComponentActivity() {
                         onShowArtCaptionChange = { lifecycleScope.launch { store.setShowArtCaption(it) } },
                         onArtRussianChange = { lifecycleScope.launch { store.setArtRussian(it) } },
                         onMinVideoSecondsChange = { lifecycleScope.launch { store.setMinVideoSeconds(it) } },
+                        onExportSettings = { toStorage ->
+                            status = "Сохраняю настройки…"
+                            vm.exportSettings(toStorage) { status = it }
+                        },
+                        onImportSettings = { fromStorage ->
+                            status = "Загружаю настройки…"
+                            vm.importSettings(fromStorage) { status = it }
+                        },
                         onMusicModeChange = { mode ->
                             lifecycleScope.launch {
                                 store.setMusicMode(mode)
@@ -368,7 +387,9 @@ class MainActivity : ComponentActivity() {
                             vm.deleteHidden { report -> status = report }
                         },
                         onDiagnostics = { vm.showDiagnostics { status = it } },
-                        onClose = { showSettings = false }
+                        onClose = { showSettings = false },
+                        onEdit = { change -> lifecycleScope.launch { store.change() } },
+                        onBrowseLocal = { vm.openBrowser("local", "Папки на устройстве и флешке") }
                     )
                 } else {
                     SlideshowScreen(
@@ -380,7 +401,7 @@ class MainActivity : ComponentActivity() {
                         onLongPress = { openActionMenu(armed = true) },
                         onMenuPick = { index ->
                             val item = vm.menuPick(index)
-                            if (item?.openSettings == true) showSettings = true
+                            if (item?.openSettings == true) openSettings()
                         },
                         onMenuClose = { vm.closeMenu() },
                         onVideoEnded = { vm.onVideoEnded(it) },
@@ -395,11 +416,29 @@ class MainActivity : ComponentActivity() {
                         onLoadSuccess = { vm.reportLoadSuccess(it) }
                     )
                 }
+
+                if (pinAsk) {
+                    com.fotoframe.ui.PinDialog(
+                        pin = state.settings.settingsPin,
+                        onSuccess = { pinAsk = false; showSettings = true },
+                        onCancel = { pinAsk = false }
+                    )
+                }
             }
         }
 
         requestMediaPermission()
         vm.start()
+
+        // Заставка может включиться поверх открытого приложения, а на части
+        // прошивок окно под ней не получает onStop — тогда шли бы два показа
+        // и две музыки разом. Заставка сообщает о себе, и показ здесь встаёт.
+        lifecycleScope.launch {
+            (application as App).dreamActive.collect { dreaming ->
+                if (dreaming) vm.suspendShow()
+                else if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) vm.start()
+            }
+        }
     }
 
     /**
@@ -491,7 +530,7 @@ class MainActivity : ComponentActivity() {
         keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
 
     private val slideshowVisible: Boolean
-        get() = !showSettings && !vm.browse.value.visible
+        get() = !showSettings && !pinAsk && !vm.browse.value.visible
 
     /**
      * Меню принимает OK только после того, как кнопку отпустили, и не
@@ -565,6 +604,14 @@ class MainActivity : ComponentActivity() {
             return super.onKeyDown(keyCode, event)
         }
 
+        if (pinAsk) {
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                pinAsk = false
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
+
         val current = vm.state.value
 
         if (current.menu != null) {
@@ -578,7 +625,7 @@ class MainActivity : ComponentActivity() {
                     // после открытия.
                     if (menuArmed && !repeat && settled) {
                         val item = vm.menuSelect()
-                        if (item?.openSettings == true) showSettings = true
+                        if (item?.openSettings == true) openSettings()
                     }
                     true
                 }
@@ -634,7 +681,7 @@ class MainActivity : ComponentActivity() {
                 openActionMenu(armed = true); true
             }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
-                showSettings = true; true
+                openSettings(); true
             }
             else -> super.onKeyDown(keyCode, event)
         }
@@ -685,16 +732,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        vm.resumeMusic()
+        // Под заставкой показ не нужен: у неё свой.
+        if ((application as App).dreamActive.value == false) vm.start()
     }
 
     /**
-     * «Домой» на пульте — приложение уходит в фон. Показ может идти дальше
-     * (его останавливает onDestroy), а музыка — нет: иначе она играла бы
-     * поверх телевизора и других приложений.
+     * «Домой» на пульте — приложение уходит в фон. Показ останавливается
+     * вместе с музыкой: в фоне он только качал бы снимки, а музыка играла
+     * бы поверх телевизора и других приложений.
      */
     override fun onStop() {
-        vm.pauseMusic()
+        vm.suspendShow()
         super.onStop()
     }
 

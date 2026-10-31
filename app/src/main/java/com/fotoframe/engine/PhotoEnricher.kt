@@ -271,7 +271,7 @@ class PhotoEnricher(
             result = result.copy(takenAt = it, takenAtExact = true)
         }
 
-        val coords = runCatching { exif.latLong }.getOrNull()
+        val coords = gpsOf(exif)
         if (coords != null && (coords[0] != 0.0 || coords[1] != 0.0)) {
             dao.setCoords(result.id, coords[0], coords[1])
             result = result.copy(latitude = coords[0], longitude = coords[1])
@@ -315,7 +315,7 @@ class PhotoEnricher(
 
             var header = quickHeader
             var exif = quickHeader.exif
-            var coords = runCatching { exif.latLong }.getOrNull()
+            var coords = gpsOf(exif)
 
             // Перечитывать снимок целиком имеет смысл только для HEIC:
             // там метаданные разбираются лишь по всему файлу. У JPEG блок
@@ -324,7 +324,7 @@ class PhotoEnricher(
             if (coords == null && photo.sourceId == "smb" && isHeif(photo.displayName)) {
                 val full = tryOrNull { openHeader(photo, deep = true) }
                 if (full != null) {
-                    val deepCoords = runCatching { full.exif.latLong }.getOrNull()
+                    val deepCoords = gpsOf(full.exif)
                     if (deepCoords != null) {
                         deepRescued++
                         coords = deepCoords
@@ -545,6 +545,40 @@ class PhotoEnricher(
         return null
     }
 
+    /**
+     * Координаты из EXIF. Стандартный способ Android требует, чтобы рядом с
+     * широтой и долготой были записаны их «стороны света» (север/юг,
+     * восток/запад). Часть телефонов и редакторов эти пометки не пишет, и
+     * координаты, которые в снимке есть, терялись целиком: другие программы
+     * место показывали, рамка — нет. Теперь при отсутствии пометок числа
+     * разбираются вручную, а сторона считается северной и восточной — так
+     * же поступают и другие программы.
+     */
+    private fun gpsOf(exif: ExifInterface): DoubleArray? {
+        runCatching { exif.latLong }.getOrNull()?.let { return it }
+
+        fun dms(raw: String?): Double? {
+            // «55/1,45/1,1234/100» — градусы, минуты, секунды дробями.
+            val parts = raw?.split(',')?.map { it.trim() } ?: return null
+            if (parts.isEmpty()) return null
+            val nums = parts.map { p ->
+                val (n, d) = p.split('/').let { it.getOrNull(0) to it.getOrNull(1) }
+                val num = n?.toDoubleOrNull() ?: return null
+                val den = d?.toDoubleOrNull() ?: 1.0
+                if (den == 0.0) return null
+                num / den
+            }
+            return nums.getOrElse(0) { 0.0 } + nums.getOrElse(1) { 0.0 } / 60 + nums.getOrElse(2) { 0.0 } / 3600
+        }
+
+        var lat = dms(exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE)) ?: return null
+        var lon = dms(exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE)) ?: return null
+        if (exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE_REF).equals("S", ignoreCase = true)) lat = -lat
+        if (exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF).equals("W", ignoreCase = true)) lon = -lon
+        if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
+        return doubleArrayOf(lat, lon)
+    }
+
     // ---------- 2. Названия мест ----------
 
     /** Возвращает число снимков, получивших ответ (включая «места нет»). */
@@ -642,7 +676,10 @@ class PhotoEnricher(
         lastNominatimAt = System.currentTimeMillis()
 
         val url = "https://nominatim.openstreetmap.org/reverse" +
-            "?format=jsonv2&zoom=10&accept-language=ru&lat=$lat&lon=$lon"
+            // zoom=14 — уровень посёлка. Было 10 — «уровень города»: для
+            // снимков за городом это давало ближайший районный центр, иногда
+            // за десятки километров, и место выходило ошибочным.
+            "?format=jsonv2&zoom=14&accept-language=ru&lat=$lat&lon=$lon"
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", "FotoFrame/0.4 (personal Android TV photo frame)")
@@ -675,7 +712,8 @@ class PhotoEnricher(
         // местное — для подписи оно бесполезно, лучше подняться до
         // провинции или страны.
         val levels = listOfNotNull(
-            field("city"), field("town"), field("village"), field("municipality"),
+            field("city"), field("town"), field("village"), field("hamlet"),
+            field("suburb"), field("municipality"),
             field("county"), field("state"), field("country")
         )
         levels.firstOrNull { readable(it) } ?: ""

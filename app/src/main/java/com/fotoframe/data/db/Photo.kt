@@ -155,6 +155,7 @@ data class ThumbRow(
 /** Срез полей, по которым работает фильтр содержимого. */
 data class FilterRow(
     val id: Long,
+    val enabled: Boolean,
     val sourceId: String,
     val isVideo: Boolean,
     val durationMs: Long,

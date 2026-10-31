@@ -12,6 +12,7 @@ import com.fotoframe.source.DeleteResult
 import com.fotoframe.source.SmbSource
 import com.fotoframe.data.prefs.SlideshowSettings
 import com.fotoframe.data.prefs.enabledMuseums
+import com.fotoframe.data.prefs.musicVolumeAt
 import com.fotoframe.source.Folder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -61,6 +62,8 @@ data class BrowseState(
     /** Путь, откуда пришли, — для кнопки «наверх». */
     val stack: List<String> = emptyList(),
     val entries: List<Folder> = emptyList(),
+    /** Название текущей папки — для папок устройства, где путь это номер альбома. */
+    val pathName: String = "",
     val loading: Boolean = false,
     val error: String? = null
 )
@@ -206,21 +209,42 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     /** Скрытые с пульта снимки — для списка в настройках. */
     val hiddenPhotos: StateFlow<List<Photo>> = _hidden.asStateFlow()
 
+    /** Показ идёт в экранной заставке — музыка там только по отдельной настройке. */
+    private var inScreensaver = false
+
+    /** Настройки прочитаны с диска — до этого кадры не собираются. */
+    private val settingsReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+
     init {
         viewModelScope.launch {
             var lastSources: Triple<String?, String, String>? = null
-            var lastComposition: Triple<Boolean, Boolean, Boolean>? = null
+            var lastComposition: List<Boolean>? = null
+            var lastLocalFolder: String? = null
             var lastMinVideo: Int? = null
             var lastArt: Pair<String, Set<String>>? = null
             application.settingsStore.settings.collect { s ->
                 _state.value = _state.value.copy(settings = s)
+                // Первые настройки с диска пришли — показ может собирать кадры.
+                // До этого в состоянии стояли значения по умолчанию, и первые
+                // пять кадров очереди собирались по ним: пары включены, музыка
+                // выключена, фильтр по умолчанию. Отсюда «выключил пары, а
+                // они всё равно идут» после каждого запуска.
+                if (!settingsReady.isCompleted) settingsReady.complete(Unit)
 
                 // Пары и отсев серий решаются при сборке кадра, а очередь
                 // держит собранные заранее: выключил пары — ещё пять
                 // кадров шли парами. Теперь очередь сбрасывается.
-                val composition = Triple(s.pairPortraits, s.pairByContent, s.skipSimilar)
+                // Исходники Диска вместо превью — тоже: очередь собрана с превью.
+                val composition = listOf(s.pairPortraits, s.pairByContent, s.skipSimilar, s.yandexOriginals)
                 if (lastComposition != null && composition != lastComposition) clearQueue()
                 lastComposition = composition
+
+                // Выбрали другую папку устройства — обойти устройство заново,
+                // иначе выбор подействовал бы только после ручного обновления.
+                if (lastLocalFolder != null && s.localFolder != lastLocalFolder) {
+                    reindex { report -> Log.i(TAG, "Папка устройства сменилась: $report") }
+                }
+                lastLocalFolder = s.localFolder
 
                 // Сменили порог коротких роликов — пересчитать допуск.
                 if (lastMinVideo != null && s.minVideoSeconds != lastMinVideo) {
@@ -234,8 +258,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 // перезапускается. Раньше музыка стартовала из start() показа
                 // до того, как настройки успевали прочитаться с диска, видела
                 // «выключено» — и больше не запускалась.
-                if (musicAllowed && loop?.isActive == true && s.showMode != "video") music.start(s)
-                else if (s.showMode == "video") music.stop()
+                applyMusic(s)
 
                 // Источник подключили или отключили — пересчитать допуск,
                 // чтобы его снимки сразу вошли в показ или вышли из него.
@@ -269,28 +292,57 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Цикл показа. Просыпается не реже раза в секунду и сверяется с
+     * Единое решение, играть ли музыку и как громко. Зовётся при смене
+     * настроек, запуске, возврате в приложение и раз в минуту из цикла
+     * показа — ради ночного режима.
+     */
+    private fun applyMusic(s: SlideshowSettings = _state.value.settings) {
+        val allowed = settingsReady.isCompleted &&
+            showRunning &&
+            s.showMode != "video" &&
+            (!inScreensaver || s.musicInScreensaver)
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val volume = s.musicVolumeAt(hour)
+        if (!allowed || volume == 0) music.stop()
+        else music.start(s.copy(musicVolume = volume))
+    }
+
+    /** Когда запустили показ — чтобы измерять время до первого кадра. */
+    private var startedAt = 0L
+
+    /** Показ запущен и не остановлен. Отдельно от [loop]: тот присваивается уже после старта корутины. */
+    private var showRunning = false
+
+    /**
+     * Запуск показа. [screensaver] — показ внутри экранной заставки: музыка
+     * там играет, только если это включено отдельной настройкой. Кадры
+     * начинают собираться, когда настройки прочитаны с диска.
+     */
+    /*
+     * Цикл показа просыпается не реже раза в секунду и сверяется с
      * [lastAdvanceAt]: так пропуск кадра кнопкой начинает отсчёт заново,
      * а смена интервала в настройках действует сразу, а не со следующего
      * кадра.
      */
-    /** Можно ли играть музыку: в заставке — нет, ночью это был бы сюрприз. */
-    private var musicAllowed = true
-
-    /**
-     * Запуск показа. [withMusic] = false — для заставки. Музыка стартует,
-     * если настройки уже прочитаны; если нет — стартует сборщик настроек,
-     * как только они придут.
-     */
-    fun start(withMusic: Boolean = true) {
-        musicAllowed = withMusic
+    fun start(screensaver: Boolean = false) {
+        inScreensaver = screensaver
+        showRunning = true
+        if (_state.value.current == null) startedAt = System.currentTimeMillis()
         startWeather()
-        val current = _state.value.settings
-        if (withMusic && current.showMode != "video") music.start(current) else music.stop()
-        if (loop?.isActive == true) return
+        if (loop?.isActive == true) { applyMusic(); return }
         loop = viewModelScope.launch {
-            advance()
+            settingsReady.await()
+            applyMusic()
+            // Вернулись в приложение — кадр на экране досматривается, а не
+            // сменяется в ту же секунду.
+            if (_state.value.current == null) advance() else lastAdvanceAt = System.currentTimeMillis()
+            var musicCheckedAt = System.currentTimeMillis()
             while (true) {
+                // Ночной режим музыки: раз в минуту сверить громкость с часами.
+                if (System.currentTimeMillis() - musicCheckedAt > 60_000) {
+                    musicCheckedAt = System.currentTimeMillis()
+                    applyMusic()
+                }
                 val s = _state.value
                 if (s.paused || s.inHistory || s.zoomed || s.menu != null) {
                     // Стоим: снимок, к которому вернулись или который поставили
@@ -329,11 +381,21 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stop() {
+        showRunning = false
         loop?.cancel()
         loop = null
         fillJob?.cancel()
         music.stop()
     }
+
+    /**
+     * Приложение ушло с экрана — «Домой» или поверх включилась заставка.
+     * Показ останавливается целиком, а не только музыка: прежде он шёл в
+     * фоне и качал снимки, а под заставкой работали два показа сразу,
+     * каждый со своей очередью, и вытесняли из общего кэша файлы друг
+     * друга — к утру оба показывали «не удалось загрузить».
+     */
+    fun suspendShow() = stop()
 
     private val _musicFolders = MutableStateFlow<List<String>>(emptyList())
     val musicFolders: StateFlow<List<String>> = _musicFolders.asStateFlow()
@@ -391,19 +453,8 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
     /** После выдачи разрешения на аудио — собрать список заново. */
     fun restartMusic() {
-        if (musicAllowed && loop?.isActive == true) {
-            music.stop()
-            music.start(_state.value.settings)
-        }
-    }
-
-    /** Приложение ушло в фон (кнопка «Домой») — музыку выключить. */
-    fun pauseMusic() = music.stop()
-
-    /** Вернулись в приложение — музыку снова, если она включена. */
-    fun resumeMusic() {
-        val current = _state.value.settings
-        if (musicAllowed && loop?.isActive == true && current.showMode != "video") music.start(current)
+        music.stop()
+        applyMusic()
     }
 
     override fun onCleared() {
@@ -1022,12 +1073,23 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         loadFailures++
         if (loadFailures > MAX_LOAD_FAILURES) {
-            _state.value = s.copy(
-                message = "Снимки не загружаются. Проверьте сеть и хранилище."
-            )
+            _state.value = s.copy(message = lowSpaceMessage() ?: "Снимки не загружаются. Проверьте сеть и хранилище.")
             return
         }
         viewModelScope.launch { advance() }
+    }
+
+    /**
+     * Самая частая причина «ничего не грузится» после суток работы — место
+     * на устройстве кончилось из-за других приложений. Тогда говорим это
+     * прямо, с цифрой.
+     */
+    private fun lowSpaceMessage(): String? {
+        val mb = StorageGuard.lowSpaceMb
+        if (mb < 0) return null
+        return "На устройстве почти не осталось места: свободно $mb МБ. Рамке негде хранить " +
+            "снимки перед показом. Освободите место — удалите ненужные приложения или " +
+            "очистите их кэш в настройках Android."
     }
 
     /** Картинка на экране — цепочка неудач прервана. */
@@ -1108,6 +1170,12 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // а человек смотрит на пустой экран.
         if (slide != null && currentId != null) warmToMemory(slide)
 
+        // Время до первого кадра — главная мера скорости для рамки.
+        if (slide != null && currentId == null && startedAt > 0) {
+            Log.i(TAG, "Первый кадр через ${System.currentTimeMillis() - startedAt} мс после запуска")
+            startedAt = 0
+        }
+
         if (slide == null) {
             // Причина — точная: «нет фотографий» пишется только когда их
             // действительно нет. Отсеянные фильтром и отключённые источники
@@ -1125,8 +1193,18 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 enabled == 0 ->
                     "В индексе $total снимков, но все отсеяны фильтром содержимого или " +
                         "относятся к отключённым источникам. Проверьте настройки."
-                else ->
-                    "Не удалось получить снимок из источника. Проверьте сеть и хранилище."
+                // Сетевая папка не отвечает — говорим об этом прямо. Самая
+                // частая причина — компьютер с общей папкой уснул: в Windows
+                // сон по умолчанию через полчаса, и рамка «ломалась» ровно
+                // через 30–40 минут. Переподключение рамка пробует сама при
+                // каждом кадре, так что проснулся компьютер — показ пошёл.
+                application.sources.smb.isDown() ->
+                    "Сетевая папка не отвечает (${application.sources.smb.lastError ?: "нет связи"}). " +
+                        "Если папка на компьютере — он мог уйти в сон: разбудите его или отключите " +
+                        "сон в настройках электропитания Windows. Рамка подключится сама, как только " +
+                        "папка станет доступна."
+                else -> lowSpaceMessage()
+                    ?: "Не удалось получить снимок из источника. Проверьте сеть и хранилище."
             }
             _state.value = _state.value.copy(message = msg)
             return@withLock
@@ -1168,6 +1246,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     private fun ensureQueue() {
         if (fillJob?.isActive == true) return
         fillJob = viewModelScope.launch {
+            settingsReady.await()
             while (queue.size < PREFETCH_DEPTH) {
                 // Наполнение постепенное. Первый запасной кадр нужен срочно —
                 // он и есть следующий показ. Остальные могут подождать:
@@ -1213,17 +1292,26 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Музеи, выбранные в режиме картин, которых ещё нет в индексе. */
+    private var museumIndexing = false
+
     private fun ensureMuseumsIndexed(s: com.fotoframe.data.prefs.SlideshowSettings) {
+        // Сборщик настроек и старт показа могут позвать это почти разом —
+        // второй обход поверх первого только мешал бы.
+        if (museumIndexing) return
         viewModelScope.launch {
             val missing = s.enabledMuseums().filter { dao.countAllBySource(it) == 0 }
             if (missing.isEmpty()) return@launch
-            // Пока грузится список, на экране остаётся прежний кадр, а если
-            // его нет — «Готовлю первый кадр…». Потом сразу первая картина.
-            indexMuseums(s)
-            tryOrNull { filter.apply(application.settingsStore.settings.first()) }
-            clearQueue()
-            if (_state.value.current == null || _state.value.current?.photo?.sourceId !in com.fotoframe.source.MUSEUM_SOURCES) {
-                advance()
+            museumIndexing = true
+            try {
+                // Пока грузится список, на экране остаётся прежний кадр, а если
+                // его нет — «Готовлю первый кадр…». Потом сразу первая картина.
+                indexMuseums(s)
+                tryOrNull { filter.apply(application.settingsStore.settings.first()) }
+                clearQueue()
+                val cur = _state.value.current
+                if (cur == null || cur.photo.sourceId !in com.fotoframe.source.MUSEUM_SOURCES) advance()
+            } finally {
+                museumIndexing = false
             }
         }
     }
@@ -1447,6 +1535,54 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         return enriched to url
     }
 
+    // ---------- Перенос настроек ----------
+
+    /** Файл настроек в папке приложения — доступен через adb pull/push. */
+    private fun settingsFile(): java.io.File =
+        java.io.File(application.getExternalFilesDir(null) ?: application.filesDir, com.fotoframe.source.SmbSource.SETTINGS_FILE)
+
+    fun exportSettings(toStorage: Boolean, onDone: (String) -> Unit) {
+        viewModelScope.launch {
+            val json = tryOrNull { application.settingsStore.exportJson() }
+                ?: return@launch onDone("Не удалось собрать настройки")
+            val bytes = json.toByteArray(Charsets.UTF_8)
+            if (toStorage) {
+                val ok = application.sources.smb.writeFrameFile(com.fotoframe.source.SmbSource.SETTINGS_FILE, bytes)
+                onDone(
+                    if (ok) "Настройки сохранены на хранилище: ${com.fotoframe.source.SmbSource.FRAME_DIR}\\${com.fotoframe.source.SmbSource.SETTINGS_FILE}"
+                    else "Не удалось записать на хранилище: ${application.sources.smb.lastError ?: "нет связи"}"
+                )
+            } else {
+                val f = settingsFile()
+                val ok = tryOrNull { withContext(Dispatchers.IO) { f.writeBytes(bytes); true } } ?: false
+                onDone(if (ok) "Настройки сохранены в файл: ${f.absolutePath}" else "Не удалось записать файл")
+            }
+        }
+    }
+
+    fun importSettings(fromStorage: Boolean, onDone: (String) -> Unit) {
+        viewModelScope.launch {
+            val bytes = if (fromStorage) {
+                application.sources.smb.readFrameFile(com.fotoframe.source.SmbSource.SETTINGS_FILE)
+                    ?: return@launch onDone("На хранилище нет файла настроек (${com.fotoframe.source.SmbSource.FRAME_DIR}\\${com.fotoframe.source.SmbSource.SETTINGS_FILE})")
+            } else {
+                val f = settingsFile()
+                tryOrNull { withContext(Dispatchers.IO) { if (f.exists()) f.readBytes() else null } }
+                    ?: return@launch onDone("Файла нет: ${f.absolutePath}")
+            }
+            val n = try {
+                application.settingsStore.importJson(String(bytes, Charsets.UTF_8))
+            } catch (e: Exception) {
+                e.rethrowIfCancelled()
+                return@launch onDone("Файл настроек не подошёл: ${e.message}")
+            }
+            // Источники могли смениться — пересчитать допуск и обойти заново.
+            clearQueue()
+            onDone("Применено настроек: $n. Обновляю список…")
+            reindex { onDone("Применено настроек: $n. $it") }
+        }
+    }
+
     /** Сколько записей от источника в индексе — для кнопки удаления. */
     private val _sourceCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
     val sourceCounts: StateFlow<Map<String, Int>> = _sourceCounts.asStateFlow()
@@ -1493,7 +1629,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val s = application.settingsStore.settings.first()
             val r = filter.apply(s)
-            onDone("К показу допущено ${r.enabled}, отсеяно ${r.hidden}")
+            onDone(r.describe())
         }
     }
 
@@ -1545,6 +1681,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         _browse.value = current.copy(
             path = folder.path,
+            pathName = folder.name,
             stack = current.stack + current.path,
             loading = true,
             error = null
@@ -1562,6 +1699,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         val parent = current.stack.last()
         _browse.value = current.copy(
             path = parent,
+            pathName = "",
             stack = current.stack.dropLast(1),
             loading = true,
             error = null
@@ -1628,11 +1766,20 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
-            val folders = runCatching { source.listFolders(path.ifBlank { null }) }
+            // Текст ошибки нужен в окне обзора, а отмену проглатывать нельзя —
+            // поэтому не tryOrNull, а явный перехват.
+            var failure: String? = null
+            val folders = try {
+                source.listFolders(path.ifBlank { null })
+            } catch (e: Throwable) {
+                e.rethrowIfCancelled()
+                failure = "Ошибка чтения: ${e.message}"
+                emptyList()
+            }
             _browse.value = _browse.value.copy(
                 loading = false,
-                entries = folders.getOrDefault(emptyList()),
-                error = folders.exceptionOrNull()?.let { "Ошибка чтения: ${it.message}" }
+                entries = folders,
+                error = failure
             )
         }
     }
@@ -1679,7 +1826,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
 
-                report.append("Устройство: ${indexer.index(application.sources.local, "*", force).describe()}")
+                report.append("Устройство: ${indexer.index(application.sources.local, settings.localFolder.ifBlank { "*" }, force).describe()}")
 
                 if (settings.yandexToken != null) {
                     report.append("\nЯндекс.Диск: ${indexer.index(application.sources.yandex, settings.yandexFolder, force).describe()}")
@@ -1695,7 +1842,7 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
                 val s = application.settingsStore.settings.first()
                 val f = filter.apply(s)
-                report.append("\nК показу допущено ${f.enabled}, отсеяно ${f.hidden}")
+                report.append("\n" + f.describe())
                 application.settingsStore.setLastIndexAt(System.currentTimeMillis())
                 onDone(report.toString().trim())
 
@@ -1724,6 +1871,30 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun showDiagnostics(onDone: (String) -> Unit) {
         viewModelScope.launch { onDone(diagnostics()) }
+    }
+
+    /** Последние строки W/E из журнала самой рамки, коротко. */
+    private suspend fun recentProblems(): List<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val p = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "800", "-v", "time", "*:W"))
+            val out = p.inputStream.bufferedReader().readLines()
+            p.destroy()
+            val ours = setOf(
+                "Slideshow", "PhotoEnricher", "SmbSource", "IndexWorker", "Video", "Music",
+                "Museum", "Weather", "Storage", "Indexer", "YandexDisk", "FotoFrame"
+            )
+            out.filter { line ->
+                // «09-27 12:49:19.915 W/Video(27722): …»
+                val tag = line.substringAfter(' ').substringAfter(' ').substringAfter('/').substringBefore('(').trim()
+                tag in ours || line.contains("AndroidRuntime") || line.contains("FATAL")
+            }
+                .takeLast(12)
+                .map { line ->
+                    val time = line.substringAfter(' ').substringBefore('.')
+                    val text = line.substringAfter("): ", line)
+                    "$time  " + text.take(140)
+                }
+        }.getOrDefault(emptyList())
     }
 
     private suspend fun diagnostics(): String {
@@ -1763,7 +1934,26 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
             }
             lines += "Текущий кадр: ${p.sourceId}, ${p.displayName}"
             lines += "  дата: $date; место: $place"
+            // Координаты — чтобы сверить с другой программой, откуда место.
+            val la = p.latitude
+            val lo = p.longitude
+            if (la != null && lo != null) {
+                lines += "  координаты: %.5f, %.5f".format(java.util.Locale.US, la, lo)
+            }
         }
+
+        // Последние предупреждения и ошибки самой рамки — прямо на экране.
+        // Пользователю не нужны adb и компьютер: открыл диагностику в момент
+        // сбоя, сфотографировал экран. Приложение читает только свой журнал,
+        // разрешений для этого не нужно.
+        val recent = recentProblems()
+        if (recent.isNotEmpty()) {
+            lines += ""
+            lines += "Последние предупреждения:"
+            lines += recent
+        }
+        // Свободное место — частый подозреваемый, пусть будет на виду.
+        lines += "Свободно на устройстве: %.0f МБ".format(application.cacheDir.usableSpace / 1048576.0)
 
         return lines.joinToString("\n")
     }
