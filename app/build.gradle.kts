@@ -27,8 +27,8 @@ android {
         // времени в погоде переведён с java.time на SimpleDateFormat.
         minSdk = 24
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.1"
+        versionCode = 20
+        versionName = "1.1.2"
     }
 
     signingConfigs {

@@ -10,12 +10,15 @@ import com.fotoframe.App
 import com.fotoframe.data.db.Photo
 import com.fotoframe.source.DeleteResult
 import com.fotoframe.source.SmbSource
+import com.fotoframe.data.prefs.FitMode
 import com.fotoframe.data.prefs.SlideshowSettings
 import com.fotoframe.data.prefs.enabledMuseums
 import com.fotoframe.data.prefs.musicVolumeAt
 import com.fotoframe.source.Folder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +29,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.roundToInt
 
 /**
  * Кадр на экране. Обычно это один снимок, но два вертикальных
@@ -1237,6 +1241,13 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
         // Готовим следующий кадр заранее: к моменту смены и ссылка получена,
         // и сам файл уже лежит в кэше — сеть показ не задерживает.
         ensureQueue()
+
+        // Очередь сдвинулась: ближайшие кадры раскодировать сейчас, пока
+        // идёт показ, а не в момент смены. Уже готовые берутся из памяти
+        // мгновенно.
+        queue.take(MEMORY_AHEAD).forEach { next ->
+            viewModelScope.launch { warmToMemory(next, WARM_BACKGROUND_MS) }
+        }
     }
 
     /**
@@ -1261,7 +1272,9 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
                 val slide = buildSlide(settings, exclude = reservedIds()) ?: break
                 queue.addLast(slide)
                 // Ближайшие — сразу в память, остальные лежат на диске.
-                if (queue.indexOf(slide) < MEMORY_AHEAD) warmToMemory(slide)
+                // В фоне ждать можно дольше: два исходника с Диска по 8 МБ
+                // за пять секунд на медленной сети не успевали.
+                if (queue.indexOf(slide) < MEMORY_AHEAD) warmToMemory(slide, WARM_BACKGROUND_MS)
             }
         }
     }
@@ -1340,24 +1353,64 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Раскодировать кадр в память в размере экрана и дождаться. Именно
-     * размер экрана: AsyncImage запросит его же и попадёт в кэш памяти,
-     * а не пойдёт раскодировать заново. Прежний прогрев без размера
-     * складывал в кэш оригинал на десятки мегабайт — он и не помещался
-     * толком, и вытеснял соседей.
+     * Раскодировать кадр в память ровно так, как его запросит экран, и
+     * дождаться. «Ровно так» — главное: загрузчик берёт из памяти только
+     * картинку не меньше запрошенной. Прежде кадр готовился вписанным в
+     * экран, а половина пары с обрезкой просит больше по ширине — память
+     * не подходила, снимок раскодировался заново при показе, и на
+     * исходниках с NAS или Диска вторая половина пары появлялась на
+     * полторы-две секунды позже первой. Размытая подложка тоже готовится
+     * заранее: на исходнике в 12 Мп и её раскодирование заметно.
      */
-    private suspend fun warmToMemory(slide: Slide) {
+    private suspend fun warmToMemory(slide: Slide, timeoutMs: Long = WARM_TIMEOUT_MS) {
         if (slide.photo.isVideo) return
         val dm = application.resources.displayMetrics
-        val w = dm.widthPixels.coerceAtLeast(1)
-        val h = dm.heightPixels.coerceAtLeast(1)
-        withTimeoutOrNull(WARM_TIMEOUT_MS) {
-            listOfNotNull(slide.displayUrl, slide.secondUrl).forEach { url ->
-                tryOrNull {
-                    application.imageLoader.execute(
-                        ImageRequest.Builder(application).data(url).size(w, h).build()
-                    )
-                }
+        val w = dm.widthPixels.coerceAtLeast(1).toFloat()
+        val h = dm.heightPixels.coerceAtLeast(1).toFloat()
+        val settings = _state.value.settings
+        val requests = ArrayList<ImageRequest>()
+
+        // Повёрнутый вручную снимок раскодируется неповёрнутым — в рамку
+        // с переставленными сторонами.
+        fun add(url: String, photo: Photo, boxW: Float, boxH: Float, crop: Boolean) {
+            val sideways = photo.rotation % 180 != 0
+            val rw = (if (sideways) boxH else boxW).roundToInt().coerceAtLeast(1)
+            val rh = (if (sideways) boxW else boxH).roundToInt().coerceAtLeast(1)
+            requests += ImageRequest.Builder(application)
+                .data(url)
+                .size(rw, rh)
+                .scale(if (crop) coil.size.Scale.FILL else coil.size.Scale.FIT)
+                .build()
+        }
+
+        val second = slide.second
+        val secondUrl = slide.secondUrl
+        val backdrop: Boolean
+        if (second != null && secondUrl != null) {
+            val t = com.fotoframe.ui.pairTiles(w, h, dm.density, slide.photo, second)
+            add(slide.displayUrl, slide.photo, t.leftW, t.height, t.crop)
+            add(secondUrl, second, t.rightW, t.height, t.crop)
+            backdrop = settings.fitMode != FitMode.FIT_BLACK
+        } else {
+            val mode = com.fotoframe.ui.effectiveFitMode(
+                slide.photo.width.toFloat(), slide.photo.height.toFloat(), slide.photo.isPortrait,
+                w, h, settings.fitMode, settings.portraitFitWhole
+            )
+            add(slide.displayUrl, slide.photo, w, h, mode == FitMode.FILL || mode == FitMode.KEN_BURNS)
+            backdrop = mode == FitMode.FIT_BLUR
+        }
+        if (backdrop) {
+            listOfNotNull(slide.displayUrl, secondUrl).forEach {
+                requests += com.fotoframe.ui.backdropRequest(application, it)
+            }
+        }
+
+        // Все сразу, а не по очереди: снимки пары раскодируются параллельно.
+        withTimeoutOrNull(timeoutMs) {
+            kotlinx.coroutines.coroutineScope {
+                requests.map { r ->
+                    async { tryOrNull { application.imageLoader.execute(r) } }
+                }.awaitAll()
             }
         }
     }
@@ -2011,6 +2064,9 @@ class SlideshowViewModel(app: Application) : AndroidViewModel(app) {
 
         /** Потолок ожидания раскодировки перед показом. */
         private const val WARM_TIMEOUT_MS = 5_000L
+
+        /** Подготовка кадра очереди в фоне — экран её не ждёт. */
+        private const val WARM_BACKGROUND_MS = 30_000L
 
         /** Окно серии по времени съёмки — в обе стороны. */
         private const val SERIES_WINDOW_MS = 90_000L

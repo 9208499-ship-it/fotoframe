@@ -2,6 +2,11 @@ package com.fotoframe.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -677,24 +682,13 @@ fun SettingsScreen(
                                     Button(onClick = { token = "" }) { Text("Очистить") }
                                 }
                             }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("Исходные файлы вместо превью", color = Color.White, fontSize = 18.sp)
-                                    Text(
-                                        "Превью Диска не крупнее 1920 точек и пережато — на большом экране " +
-                                            "это видно. Исходники чётче, но тяжелее для сети",
-                                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
-                                    )
-                                }
-                                Switch(
-                                    checked = settings.yandexOriginals,
-                                    onCheckedChange = { v -> onEdit { setYandexOriginals(v) } }
-                                )
-                            }
+                            ToggleLine(
+                                "Исходные файлы вместо превью",
+                                "Превью Диска не крупнее 1920 точек и пережато — на большом экране " +
+                                    "это видно. Исходники чётче, но тяжелее для сети",
+                                settings.yandexOriginals,
+                                titleSize = 18
+                            ) { v -> onEdit { setYandexOriginals(v) } }
                             Text(
                                 "Папка: " + settings.yandexFolder.ifBlank { "весь Диск" },
                                 color = Color.White.copy(alpha = 0.7f),
@@ -1000,27 +994,19 @@ private fun WeatherCard(
 
     RowCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Погода", color = Color.White, fontSize = 20.sp)
-                    Text(
-                        if (settings.weatherPlace.isBlank()) {
-                            "Температура рядом с часами. Выберите город"
-                        } else {
-                            // Координаты рядом с названием: одноимённых городов
-                            // много (Санкт-Петербург есть и во Флориде), и по
-                            // одному названию ошибку выбора не заметить.
-                            "Город: ${settings.weatherPlace} · ${coordText(settings.weatherLat, settings.weatherLon)}"
-                        },
-                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
-                    )
-                }
-                Switch(checked = settings.showWeather, onCheckedChange = onShowWeatherChange)
-            }
+            ToggleLine(
+                "Погода",
+                if (settings.weatherPlace.isBlank()) {
+                    "Температура рядом с часами. Выберите город"
+                } else {
+                    // Координаты рядом с названием: одноимённых городов
+                    // много (Санкт-Петербург есть и во Флориде), и по
+                    // одному названию ошибку выбора не заметить.
+                    "Город: ${settings.weatherPlace} · ${coordText(settings.weatherLat, settings.weatherLon)}"
+                },
+                settings.showWeather,
+                onChange = onShowWeatherChange
+            )
 
             if (settings.showWeather) {
                 Row(
@@ -1611,20 +1597,53 @@ private fun SwitchRow(
     checked: Boolean,
     onChange: (Boolean) -> Unit
 ) {
-    RowCard {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, color = Color.White, fontSize = 20.sp)
-                if (subtitle != null) {
-                    Text(subtitle, color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp)
-                }
+    RowCard { ToggleLine(title, subtitle, checked, onChange = onChange) }
+}
+
+/**
+ * Строка с переключателем. Фокус и нажатие — у всей строки, а не у
+ * самого переключателя: пульт ищет следующий элемент по прямой вниз и
+ * вверх, и переключатель у правого края, под которым ничего нет,
+ * пропускался — включить его стрелками было нельзя. Так было с
+ * «Исходными файлами» Яндекс.Диска под кнопкой «Очистить».
+ */
+@Composable
+private fun ToggleLine(
+    title: String,
+    subtitle: String?,
+    checked: Boolean,
+    titleSize: Int = 20,
+    onChange: (Boolean) -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .border(
+                2.dp,
+                if (focused) Color.White.copy(alpha = 0.8f) else Color.Transparent,
+                RoundedCornerShape(8.dp)
+            )
+            .toggleable(
+                value = checked,
+                interactionSource = interaction,
+                indication = null,
+                role = Role.Switch,
+                onValueChange = onChange
+            )
+            .padding(6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, color = Color.White, fontSize = titleSize.sp)
+            if (subtitle != null) {
+                Text(subtitle, color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp)
             }
-            Switch(checked = checked, onCheckedChange = onChange)
         }
+        // Сам переключатель — только картинка: нажатие ловит строка.
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 
@@ -1639,21 +1658,13 @@ private fun AutostartCard(enabled: Boolean, onChange: (Boolean) -> Unit) {
         !android.provider.Settings.canDrawOverlays(context)
     RowCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Запускать при включении", color = Color.White, fontSize = 20.sp)
-                    Text(
-                        "Рамка открывается сама после включения или перезагрузки. Часть прошивок " +
-                            "это запрещает — тогда выберите рамку экранной заставкой",
-                        color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp
-                    )
-                }
-                Switch(checked = enabled, onCheckedChange = onChange)
-            }
+            ToggleLine(
+                "Запускать при включении",
+                "Рамка открывается сама после включения или перезагрузки. Часть прошивок " +
+                    "это запрещает — тогда выберите рамку экранной заставкой",
+                enabled,
+                onChange = onChange
+            )
             if (enabled && needsOverlay) {
                 Text(
                     "Нужно право «Поверх других приложений» — без него Android не даст рамке " +

@@ -199,42 +199,14 @@ private fun PairOfPortraits(
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = backdropDim(backdropSaturation))))
         }
 
-        val boxW = constraints.maxWidth.toFloat()
-        val boxH = constraints.maxHeight.toFloat()
-
-        val separatorPx = with(density) { PAIR_SEPARATOR.toPx() }
-        val marginPx = with(density) { PAIR_MARGIN.toPx() }
-
-        val aspectLeft = aspectOf(slide.photo)
-        val aspectRight = aspectOf(slide.second)
-
-        // Сначала пробуем во всю доступную высоту; если по ширине не
-        // помещается — уменьшаем обоих одинаково, сохраняя пропорции.
-        var height = (boxH - marginPx * 2f).coerceAtLeast(1f)
-        val available = (boxW - marginPx * 2f - separatorPx).coerceAtLeast(1f)
-        val widthAtFullHeight = height * (aspectLeft + aspectRight)
-        if (widthAtFullHeight > available) {
-            height = available / (aspectLeft + aspectRight)
-        }
-
-        // Пара уже экрана — по бокам оставались поля, и с размытой
-        // подложкой они выглядели как рамка вокруг рамки. Если недостаток
-        // ширины невелик, растягиваем пару на всю ширину, а лишнее по
-        // высоте срезаем у обоих снимков — так же, как «во весь экран»
-        // делает с одиночным кадром. Два узких снимка 9:16 на панели 16:9
-        // потребовали бы срезать треть — столько не режем, там поля
-        // честнее.
-        val fill = if (widthAtFullHeight < available) {
-            available / widthAtFullHeight
-        } else {
-            1f
-        }
-        val cropToFill = fill > 1.001f && fill <= PAIR_FILL_MAX
-        val tileHeight = height
-        val leftWidth = if (cropToFill) available * aspectLeft / (aspectLeft + aspectRight) else height * aspectLeft
-        val rightWidth = if (cropToFill) available - leftWidth else height * aspectRight
-
-        val heightDp = with(density) { tileHeight.toDp() }
+        val tiles = pairTiles(
+            constraints.maxWidth.toFloat(), constraints.maxHeight.toFloat(),
+            density.density, slide.photo, slide.second
+        )
+        val cropToFill = tiles.crop
+        val leftWidth = tiles.leftW
+        val rightWidth = tiles.rightW
+        val heightDp = with(density) { tiles.height.toDp() }
 
         // Пара увеличивается как одно целое — вместе с разделителем.
         Row(
@@ -293,12 +265,7 @@ private fun BlurredBackdrop(url: String, modifier: Modifier = Modifier, saturati
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) it.blur(32.dp) else it
     }
     AsyncImage(
-        model = ImageRequest.Builder(context)
-            .data(url)
-            .size(BACKDROP_PX, BACKDROP_PX)
-            .precision(Precision.EXACT)
-            .allowHardware(false)
-            .build(),
+        model = remember(url) { backdropRequest(context, url) },
         contentDescription = null,
         contentScale = ContentScale.Crop,
         colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(saturation.coerceIn(0f, 1.5f)) }),
@@ -359,6 +326,88 @@ private fun PhotoTile(
             )
         }
     }
+}
+
+/** Размеры плиток пары в пикселях. */
+internal class PairTiles(val leftW: Float, val rightW: Float, val height: Float, val crop: Boolean)
+
+/**
+ * Раскладка пары: одна формула и для показа, и для подготовки кадра
+ * заранее. Подготовка раскодирует снимки ровно в тот размер, в котором
+ * они встанут на экран, — иначе при показе загрузчик не находил их в
+ * памяти и раскодировал заново, и вторая половина пары появлялась на
+ * полторы-две секунды позже первой.
+ */
+internal fun pairTiles(boxW: Float, boxH: Float, density: Float, left: Photo, right: Photo?): PairTiles {
+    val separatorPx = PAIR_SEPARATOR.value * density
+    val marginPx = PAIR_MARGIN.value * density
+
+    val aspectLeft = aspectOf(left)
+    val aspectRight = aspectOf(right)
+
+    // Сначала пробуем во всю доступную высоту; если по ширине не
+    // помещается — уменьшаем обоих одинаково, сохраняя пропорции.
+    var height = (boxH - marginPx * 2f).coerceAtLeast(1f)
+    val available = (boxW - marginPx * 2f - separatorPx).coerceAtLeast(1f)
+    val widthAtFullHeight = height * (aspectLeft + aspectRight)
+    if (widthAtFullHeight > available) {
+        height = available / (aspectLeft + aspectRight)
+    }
+
+    // Пара уже экрана — по бокам оставались поля, и с размытой
+    // подложкой они выглядели как рамка вокруг рамки. Если недостаток
+    // ширины невелик, растягиваем пару на всю ширину, а лишнее по
+    // высоте срезаем у обоих снимков — так же, как «во весь экран»
+    // делает с одиночным кадром. Два узких снимка 9:16 на панели 16:9
+    // потребовали бы срезать треть — столько не режем, там поля
+    // честнее.
+    val fill = if (widthAtFullHeight < available) available / widthAtFullHeight else 1f
+    val crop = fill > 1.001f && fill <= PAIR_FILL_MAX
+    val leftWidth = if (crop) available * aspectLeft / (aspectLeft + aspectRight) else height * aspectLeft
+    val rightWidth = if (crop) available - leftWidth else height * aspectRight
+    return PairTiles(leftWidth, rightWidth, height, crop)
+}
+
+/**
+ * Подложка — тот же файл, но крошечная копия. Свой ключ в памяти:
+ * без него подложка и сам снимок делили одну запись, и копия в 20 точек
+ * вытесняла подготовленный заранее снимок в полном размере.
+ */
+internal fun backdropRequest(context: android.content.Context, url: String): ImageRequest =
+    ImageRequest.Builder(context)
+        .data(url)
+        .memoryCacheKey("$url#backdrop")
+        .size(BACKDROP_PX, BACKDROP_PX)
+        .precision(Precision.EXACT)
+        .allowHardware(false)
+        .build()
+
+/**
+ * Режим, в котором одиночный снимок встанет на экран: вертикальные при
+ * «во весь экран» показываются целиком, если обрезка съела бы много.
+ */
+internal fun effectiveFitMode(
+    imageW: Float,
+    imageH: Float,
+    portraitHint: Boolean,
+    boxW: Float,
+    boxH: Float,
+    fitMode: FitMode,
+    portraitFitWhole: Boolean
+): FitMode {
+    val knownSize = imageW > 0f && imageH > 0f
+    val portrait = if (knownSize) imageH > imageW else portraitHint
+    val screenAspect = if (boxH > 0f) boxW / boxH else 16f / 9f
+    val imageAspect = when {
+        knownSize -> imageW / imageH
+        portrait -> 0.75f
+        else -> 1.5f
+    }
+    val losesMuch = imageAspect < screenAspect * 0.9f
+    return if (
+        portraitFitWhole && portrait && losesMuch &&
+        (fitMode == FitMode.FILL || fitMode == FitMode.KEN_BURNS)
+    ) FitMode.FIT_BLUR else fitMode
 }
 
 /**
@@ -490,26 +539,10 @@ private fun SinglePhotoUpright(
         val knownSize = imageW > 0f && imageH > 0f
         val portrait = if (knownSize) imageH > imageW else photo.isPortrait
 
-        // Насколько снимок уже экрана: обрезка отрежет ровно эту долю,
-        // поэтому целиком показываем только когда потеря заметная.
-        val screenAspect = if (boxH > 0f) boxW / boxH else 16f / 9f
-        val imageAspect = when {
-            knownSize -> imageW / imageH
-            portrait -> 0.75f
-            else -> 1.5f
-        }
-        val losesMuch = imageAspect < screenAspect * 0.9f
-
         // Что показываем на самом деле: вертикальные снимки вписываем
-        // целиком, для остальных остаётся выбранный режим.
-        val effective = if (
-            portraitFitWhole && portrait && losesMuch &&
-            (fitMode == FitMode.FILL || fitMode == FitMode.KEN_BURNS)
-        ) {
-            FitMode.FIT_BLUR
-        } else {
-            fitMode
-        }
+        // целиком, если обрезка съела бы заметную долю; для остальных
+        // остаётся выбранный режим.
+        val effective = effectiveFitMode(imageW, imageH, photo.isPortrait, boxW, boxH, fitMode, portraitFitWhole)
 
         if (effective == FitMode.FIT_BLUR) {
             // Фон — крошечная копия снимка, растянутая на весь экран:
