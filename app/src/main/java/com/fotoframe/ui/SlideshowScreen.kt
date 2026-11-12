@@ -290,19 +290,40 @@ private fun Overlay(state: SlideshowState, modifier: Modifier = Modifier) {
         // строке: без него место съёмки снимка, стоящее следом, читалось
         // как место погоды («+15°, облачно» и под ним «Южное»).
         state.weather?.let {
-            val parts = buildList {
-                add(it.line)
-                if (settings.showWind) it.windSpeed?.let { w -> add("ветер $w м/с") }
-                if (settings.showWeatherCity && settings.weatherPlace.isNotBlank()) add(settings.weatherPlace)
+            // Свой размер у погоды — поверх общего размера надписей.
+            val base = LocalDensity.current
+            val weatherDensity = remember(base, settings.weatherScale) {
+                Density(base.density, base.fontScale * settings.weatherScale)
             }
-            Text(text = parts.joinToString(" · "), fontSize = 22.sp, alpha = 0.85f)
+            CompositionLocalProvider(LocalDensity provides weatherDensity) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val parts = buildList {
+                        add(it.line)
+                        if (settings.showWind) it.windSpeed?.let { w -> add("ветер $w м/с") }
+                        if (settings.showWeatherCity && settings.weatherPlace.isNotBlank()) add(settings.weatherPlace)
+                    }
+                    Text(text = parts.joinToString(" · "), fontSize = 22.sp, alpha = 0.85f)
 
-            // Считается от текущего времени при каждой отрисовке строки
-            // часов — раз в минуту, так что «с 15:00» не устаревает, пока
-            // ответ поставщика лежит в кэше.
-            if (settings.showPrecipHint) {
-                it.precipHint(now)?.let { hint ->
-                    Text(text = hint, fontSize = 20.sp, alpha = 0.8f)
+                    // Считается от текущего времени при каждой отрисовке строки
+                    // часов — раз в минуту, так что «с 15:00» не устаревает, пока
+                    // ответ поставщика лежит в кэше.
+                    if (settings.showPrecipHint) {
+                        it.precipHint(now)?.let { hint ->
+                            Text(text = hint, fontSize = 20.sp, alpha = 0.8f)
+                        }
+                    }
+
+                    // Прогноз по дням одной строкой: «сб ☀ +9°/+3°   вс 🌧 +7°/+2°».
+                    if (settings.showForecast) {
+                        val days = it.upcomingDays(settings.forecastDays, now)
+                        if (days.isNotEmpty()) {
+                            Text(
+                                text = days.joinToString("   ") { d -> d.text() },
+                                fontSize = 20.sp,
+                                alpha = 0.8f
+                            )
+                        }
+                    }
                 }
             }
         }

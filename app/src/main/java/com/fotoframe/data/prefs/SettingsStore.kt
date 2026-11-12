@@ -331,7 +331,21 @@ data class SlideshowSettings(
      * не крупнее 1920 точек по ширине и заметно пережато — на 4K-экране
      * это видно. Исходник весит больше и дольше идёт по сети.
      */
-    val yandexOriginals: Boolean = false
+    val yandexOriginals: Boolean = false,
+
+    // ---------- Добавлено в 1.2 ----------
+
+    /** Прогноз на несколько дней строкой под погодой: «пт ☀ +9°/+3°». */
+    val showForecast: Boolean = false,
+
+    /** На сколько дней вперёд, начиная с завтра. */
+    val forecastDays: Int = 3,
+
+    /**
+     * Размер строк погоды отдельно от остальных надписей: погода длиннее
+     * часов, и в общем размере она бывала слишком крупной.
+     */
+    val weatherScale: Float = 1f
 )
 
 private val Context.dataStore by preferencesDataStore("settings")
@@ -414,6 +428,9 @@ class SettingsStore(private val context: Context) {
         val settingsPin = stringPreferencesKey("settings_pin")
         val autostart = booleanPreferencesKey("autostart")
         val yandexOriginals = booleanPreferencesKey("yandex_originals")
+        val showForecast = booleanPreferencesKey("show_forecast")
+        val forecastDays = intPreferencesKey("forecast_days")
+        val weatherScale = floatPreferencesKey("weather_scale")
 
         /** Служебное, в SlideshowSettings не входит: показ на это не реагирует. */
         val lastIndexAt = longPreferencesKey("last_index_at")
@@ -499,7 +516,10 @@ class SettingsStore(private val context: Context) {
             musicNightVolume = p[Keys.musicNightVolume] ?: defaults.musicNightVolume,
             settingsPin = p[Keys.settingsPin] ?: defaults.settingsPin,
             autostart = p[Keys.autostart] ?: defaults.autostart,
-            yandexOriginals = p[Keys.yandexOriginals] ?: defaults.yandexOriginals
+            yandexOriginals = p[Keys.yandexOriginals] ?: defaults.yandexOriginals,
+            showForecast = p[Keys.showForecast] ?: defaults.showForecast,
+            forecastDays = p[Keys.forecastDays] ?: defaults.forecastDays,
+            weatherScale = p[Keys.weatherScale] ?: defaults.weatherScale
         )
     }
 
@@ -588,6 +608,9 @@ class SettingsStore(private val context: Context) {
     suspend fun setSettingsPin(v: String) = edit { it[Keys.settingsPin] = v.filter { c -> c.isDigit() }.take(8) }
     suspend fun setAutostart(v: Boolean) = edit { it[Keys.autostart] = v }
     suspend fun setYandexOriginals(v: Boolean) = edit { it[Keys.yandexOriginals] = v }
+    suspend fun setShowForecast(v: Boolean) = edit { it[Keys.showForecast] = v }
+    suspend fun setForecastDays(v: Int) = edit { it[Keys.forecastDays] = v.coerceIn(1, FORECAST_DAYS_MAX) }
+    suspend fun setWeatherScale(v: Float) = edit { it[Keys.weatherScale] = v.coerceIn(WEATHER_SCALE_MIN, WEATHER_SCALE_MAX) }
 
     suspend fun setSmb(host: String, share: String, user: String, password: String, folder: String) =
         edit {
@@ -704,6 +727,13 @@ const val YANDEX_REFRESH_STEP = 30
 /** Границы масштаба надписей. */
 const val TEXT_SCALE_MIN = 0.7f
 const val TEXT_SCALE_MAX = 2f
+
+/** Размер строк погоды относительно остальных надписей. */
+const val WEATHER_SCALE_MIN = 0.5f
+const val WEATHER_SCALE_MAX = 1.5f
+
+/** Прогноз дальше пяти дней на рамке не нужен, да и точность падает. */
+const val FORECAST_DAYS_MAX = 5
 
 /**
  * Громкость музыки сейчас, с учётом ночного режима. Окно может переходить

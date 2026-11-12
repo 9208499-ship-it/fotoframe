@@ -437,6 +437,7 @@ fun SettingsScreen(
                 onShowCity = onShowWeatherCityChange,
                 onShowWind = onShowWindChange,
                 onShowPrecipHint = onShowPrecipHintChange,
+                onEdit = onEdit,
                 source = weatherSource
             )
         }
@@ -987,6 +988,7 @@ private fun WeatherCard(
     onShowCity: (Boolean) -> Unit = {},
     onShowWind: (Boolean) -> Unit = {},
     onShowPrecipHint: (Boolean) -> Unit = {},
+    onEdit: (suspend SettingsStore.() -> Unit) -> Unit = {},
     source: String? = null
 ) {
     var query by remember { mutableStateOf("") }
@@ -1052,6 +1054,29 @@ private fun WeatherCard(
                     "Второй строкой: «дождь с 15:00», «снег до 17:00». Появляется, только если " +
                         "в ближайшие 12 часов что-то начнётся или закончится",
                     settings.showPrecipHint, onShowPrecipHint
+                )
+                SwitchRow(
+                    "Прогноз на несколько дней",
+                    if (settings.showForecast) "Строкой под погодой: «сб ☀ +9°/+3°   вс 🌧 +7°/+2°»"
+                    else "Значок и температура днём и ночью на ближайшие дни",
+                    settings.showForecast
+                ) { v -> onEdit { setShowForecast(v) } }
+                if (settings.showForecast) {
+                    StepperRow(
+                        title = "Дней в прогнозе",
+                        caption = "Начиная с завтра",
+                        value = "${settings.forecastDays}",
+                        onPrev = { onEdit { setForecastDays(settings.forecastDays - 1) } },
+                        onNext = { onEdit { setForecastDays(settings.forecastDays + 1) } }
+                    )
+                }
+                StepperRow(
+                    title = "Размер погоды",
+                    caption = "Отдельно от остальных надписей: строка погоды длинная, и в общем размере " +
+                        "она бывает слишком крупной",
+                    value = "${(settings.weatherScale * 100).roundToInt()}%",
+                    onPrev = { onEdit { setWeatherScale(((settings.weatherScale * 10).roundToInt() - 1) / 10f) } },
+                    onNext = { onEdit { setWeatherScale(((settings.weatherScale * 10).roundToInt() + 1) / 10f) } }
                 )
                 SwitchRow(
                     "Город в строке погоды",

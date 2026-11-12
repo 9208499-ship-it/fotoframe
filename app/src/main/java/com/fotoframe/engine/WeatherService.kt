@@ -29,8 +29,16 @@ data class Weather(
      * с 15:00» считается в момент показа, чтобы она не устаревала, пока
      * ответ поставщика лежит в кэше.
      */
-    val hours: List<HourPrecip> = emptyList()
+    val hours: List<HourPrecip> = emptyList(),
+    /** Прогноз по дням, начиная с сегодняшнего или завтрашнего — как отдал поставщик. */
+    val days: List<DayForecast> = emptyList()
 ) {
+    /** Прогноз со следующего дня: сегодняшний уже на экране строкой выше. */
+    fun upcomingDays(count: Int, now: Long = System.currentTimeMillis()): List<DayForecast> {
+        val today = dayKey(now)
+        return days.filter { dayKey(it.at) > today }.distinctBy { dayKey(it.at) }.take(count)
+    }
+
     /** «дождь с 15:00», «снег до 17:00» или null, если в ближайшие часы без перемен. */
     fun precipHint(now: Long = System.currentTimeMillis()): String? = computePrecipHint(hours, now)
 
@@ -193,7 +201,7 @@ class WeatherService(private val sources: SourceRegistry) {
     private fun yandexV2(lat: Double, lon: Double, key: String): Weather? {
         val url = "https://api.weather.yandex.ru/v2/forecast" +
             "?lat=${"%.4f".format(java.util.Locale.US, lat)}&lon=${"%.4f".format(java.util.Locale.US, lon)}" +
-            "&lang=ru_RU&limit=2&hours=true"
+            "&lang=ru_RU&limit=${FORECAST_FETCH_DAYS}&hours=true"
         val body = yandexHttp(Request.Builder().url(url), key) ?: return null
         val root = Json.parseToJsonElement(body) as? JsonObject ?: return null
         val fact = root["fact"] as? JsonObject ?: return null
@@ -221,10 +229,26 @@ class WeatherService(private val sources: SourceRegistry) {
                 hours += HourPrecip(at, kind)
             }
         }
+        // По дням: parts.day — днём, parts.night — ночью; date_ts — полночь дня.
+        val days = ArrayList<DayForecast>()
+        (root["forecasts"] as? JsonArray)?.forEach { day ->
+            val o = day as? JsonObject ?: return@forEach
+            val at = o.num("date_ts")?.toLong()?.times(1000) ?: return@forEach
+            val parts = o["parts"] as? JsonObject ?: return@forEach
+            val d = parts["day"] as? JsonObject ?: return@forEach
+            val n = parts["night"] as? JsonObject
+            val hi = d.num("temp_max") ?: d.num("temp_avg") ?: return@forEach
+            val lo = n?.num("temp_min") ?: n?.num("temp_avg") ?: d.num("temp_min") ?: return@forEach
+            days += DayForecast(
+                at + 12 * 3600_000L, yandexCondition(d.str("condition").orEmpty()).second,
+                hi.roundToInt(), lo.roundToInt()
+            )
+        }
         return Weather(
             temp.roundToInt(), desc, icon, YANDEX,
             windSpeed = fact.num("wind_speed")?.roundToInt(),
-            hours = hours
+            hours = hours,
+            days = days
         )
     }
 
@@ -249,7 +273,13 @@ class WeatherService(private val sources: SourceRegistry) {
         }
 
         // С подробностями, без них и совсем коротко — что тариф отдаст.
+        // Сперва с прогнозом по дням; не принял тариф — без него.
         val point = ask(
+            "temperature condition windSpeed",
+            "forecast { hours(first: 13) { edges { node { timestamp prec precType } } } " +
+                "days(limit: $FORECAST_FETCH_DAYS) { time summary { day { avgTemperature cloudiness prec precType } " +
+                "night { avgTemperature } } } }"
+        ) ?: ask(
             "temperature condition windSpeed",
             "forecast { hours(first: 13) { edges { node { timestamp prec precType } } } }"
         ) ?: ask("temperature condition") ?: ask("temperature") ?: return null
@@ -274,11 +304,53 @@ class WeatherService(private val sources: SourceRegistry) {
                 }
                 hours += HourPrecip(at, kind)
             }
+        // По дням: облачность и осадки дня — в значок, средняя дневная и
+        // ночная температура — в «+9°/+3°».
+        val days = ArrayList<DayForecast>()
+        (((point["forecast"] as? JsonObject)?.get("days")) as? JsonArray)?.forEach { e ->
+            val o = e as? JsonObject ?: return@forEach
+            val at = parseTime(o.str("time")) ?: return@forEach
+            val summary = o["summary"] as? JsonObject ?: return@forEach
+            val d = summary["day"] as? JsonObject ?: return@forEach
+            val n = summary["night"] as? JsonObject
+            val hi = d.num("avgTemperature") ?: return@forEach
+            val lo = n?.num("avgTemperature") ?: hi
+            days += DayForecast(at + 12 * 3600_000L, v3DayIcon(d), hi.roundToInt(), lo.roundToInt())
+        }
         return Weather(
             temp.roundToInt(), desc, icon, YANDEX,
             windSpeed = now.num("windSpeed")?.roundToInt(),
-            hours = hours
+            hours = hours,
+            days = days
         )
+    }
+
+    /**
+     * Значок дня по сводке v3: осадки важнее облаков. Облачность приходит
+     * числом 0..1 или словом (CLEAR, PARTLY, SIGNIFICANT, CLOUDY, OVERCAST).
+     */
+    private fun v3DayIcon(d: JsonObject): String {
+        val prec = d.num("prec") ?: 0.0
+        val type = d.str("precType").orEmpty().uppercase()
+        if (prec >= 0.5) return when {
+            type.contains("SNOW") || type.contains("SLEET") -> "❄"
+            type.contains("HAIL") -> "⛈"
+            else -> "🌧"
+        }
+        val raw = d.str("cloudiness").orEmpty().uppercase()
+        val cloud = raw.toDoubleOrNull() ?: when (raw) {
+            "CLEAR" -> 0.0
+            "PARTLY" -> 0.25
+            "SIGNIFICANT" -> 0.5
+            "CLOUDY" -> 0.75
+            "OVERCAST" -> 1.0
+            else -> 0.5
+        }
+        return when {
+            cloud < 0.2 -> "☀"
+            cloud < 0.7 -> "⛅"
+            else -> "☁"
+        }
     }
 
     /** Время в секундах, миллисекундах или ISO-строкой — что пришлёт поставщик. */
@@ -358,7 +430,9 @@ class WeatherService(private val sources: SourceRegistry) {
         val body = get(
             "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code,wind_speed_10m" +
-                "&wind_speed_unit=ms&hourly=precipitation,weather_code&forecast_hours=13&timeformat=unixtime"
+                "&wind_speed_unit=ms&hourly=precipitation,weather_code&forecast_hours=13" +
+                "&daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=${FORECAST_FETCH_DAYS}" +
+                "&timezone=auto&timeformat=unixtime"
         ) ?: return null
         val root = Json.parseToJsonElement(body) as? JsonObject ?: return null
         val current = root["current"] as? JsonObject ?: return null
@@ -383,10 +457,27 @@ class WeatherService(private val sources: SourceRegistry) {
                 hours += HourPrecip(at, kind)
             }
         }
+        // По дням: время — местная полночь места в секундах. Берём полдень
+        // того же дня, чтобы день не съехал из-за разницы часовых поясов.
+        val days = ArrayList<DayForecast>()
+        (root["daily"] as? JsonObject)?.let { d ->
+            val times = d["time"] as? JsonArray
+            val codes = d["weather_code"] as? JsonArray
+            val maxs = d["temperature_2m_max"] as? JsonArray
+            val mins = d["temperature_2m_min"] as? JsonArray
+            if (times != null) for (i in times.indices) {
+                val at = (times[i] as? JsonPrimitive)?.content?.toLongOrNull()?.times(1000) ?: continue
+                val hi = (maxs?.getOrNull(i) as? JsonPrimitive)?.content?.toDoubleOrNull() ?: continue
+                val lo = (mins?.getOrNull(i) as? JsonPrimitive)?.content?.toDoubleOrNull() ?: continue
+                val c = (codes?.getOrNull(i) as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+                days += DayForecast(at + 12 * 3600_000L, iconFor(c), hi.roundToInt(), lo.roundToInt())
+            }
+        }
         return Weather(
             temp.roundToInt(), describe(code), iconFor(code),
             windSpeed = current.num("wind_speed_10m")?.roundToInt(),
-            hours = hours
+            hours = hours,
+            days = days
         )
     }
 
@@ -409,19 +500,7 @@ class WeatherService(private val sources: SourceRegistry) {
         val symbol = (((data["next_1_hours"] as? JsonObject)?.get("summary") as? JsonObject)
             ?.get("symbol_code") as? JsonPrimitive)?.content.orEmpty()
             .substringBefore('_')
-        val (desc, icon) = when {
-            symbol.contains("thunder") -> "гроза" to "⛈"
-            symbol.contains("sleet") -> "мокрый снег" to "❄"
-            symbol.contains("snow") -> "снег" to "❄"
-            symbol.contains("showers") -> "ливень" to "🌦"
-            symbol.contains("rain") -> "дождь" to "🌧"
-            symbol == "fog" -> "туман" to "🌫"
-            symbol == "cloudy" -> "пасмурно" to "☁"
-            symbol == "partlycloudy" -> "переменная облачность" to "⛅"
-            symbol == "fair" -> "малооблачно" to "⛅"
-            symbol == "clearsky" -> "ясно" to "☀"
-            else -> "—" to "•"
-        }
+        val (desc, icon) = metSymbol(symbol)
 
         // Почасовой ряд: время ISO в UTC, осадки за следующий час.
         val hours = ArrayList<HourPrecip>()
@@ -440,11 +519,50 @@ class WeatherService(private val sources: SourceRegistry) {
             }
             hours += HourPrecip(at, kind)
         }
+        // По дням: самая высокая и самая низкая температура за местные
+        // сутки, значок — ближайший к полудню. Ряд почасовой на двое суток
+        // и по шесть часов дальше — для прогноза на дни этого хватает.
+        val byDay = LinkedHashMap<Int, MutableList<Triple<Long, Double, String>>>()
+        for (item in series) {
+            val o = item as? JsonObject ?: continue
+            val at = parseTime(o.str("time")) ?: continue
+            val d = o["data"] as? JsonObject ?: continue
+            val t = ((d["instant"] as? JsonObject)?.get("details") as? JsonObject)?.num("air_temperature") ?: continue
+            val sym = (((d["next_6_hours"] ?: d["next_1_hours"]) as? JsonObject)?.get("summary") as? JsonObject)
+                ?.str("symbol_code").orEmpty().substringBefore('_')
+            byDay.getOrPut(dayKey(at)) { ArrayList() } += Triple(at, t, sym)
+        }
+        val days = byDay.values.mapNotNull { points ->
+            val noon = points.filter { it.third.isNotEmpty() }.minByOrNull {
+                val c = java.util.Calendar.getInstance().apply { timeInMillis = it.first }
+                kotlin.math.abs(c.get(java.util.Calendar.HOUR_OF_DAY) - 13)
+            } ?: return@mapNotNull null
+            DayForecast(
+                noon.first, metSymbol(noon.third).second,
+                points.maxOf { it.second }.roundToInt(), points.minOf { it.second }.roundToInt()
+            )
+        }
         return Weather(
             temp.roundToInt(), desc, icon,
             windSpeed = details.num("wind_speed")?.roundToInt(),
-            hours = hours
+            hours = hours,
+            days = days
         )
+    }
+
+    /** Состояние met.no («partlycloudy», «lightrainshowers») → описание и значок. */
+    private fun metSymbol(symbol: String): Pair<String, String> = when {
+        symbol.contains("thunder") -> "гроза" to "⛈"
+        symbol.contains("sleet") -> "мокрый снег" to "❄"
+        symbol.contains("snow") -> "снег" to "❄"
+        symbol.contains("showers") -> "ливень" to "🌦"
+        symbol.contains("rain") -> "дождь" to "🌧"
+        symbol == "fog" -> "туман" to "🌫"
+        symbol == "cloudy" -> "пасмурно" to "☁"
+        symbol == "partlycloudy" -> "переменная облачность" to "⛅"
+        symbol == "fair" -> "малооблачно" to "⛅"
+        symbol == "clearsky" -> "ясно" to "☀"
+        else -> "—" to "•"
     }
 
     /**
@@ -541,9 +659,35 @@ class WeatherService(private val sources: SourceRegistry) {
         /** Чаще получаса обновлять незачем, а серверу — лишняя нагрузка. */
         const val REFRESH_MS = 30L * 60 * 1000
 
+        /** Сколько дней спрашивать: сегодня и ещё пять. */
+        const val FORECAST_FETCH_DAYS = 6
+
         /** Старше этого погода не показывается, даже если новой взять негде. */
         const val STALE_MS = 3L * 60 * 60 * 1000
     }
+}
+
+/**
+ * День прогноза: [at] — любой момент этого дня (мс), значок и дневная
+ * и ночная температура.
+ */
+data class DayForecast(val at: Long, val icon: String, val max: Int, val min: Int) {
+    /** «пт ☀ +9°/+3°» */
+    fun text(): String {
+        val wd = java.text.SimpleDateFormat("EE", java.util.Locale("ru")).format(java.util.Date(at))
+            .trimEnd('.').lowercase()
+        return "$wd $icon ${signed(max)}°/${signed(min)}°"
+    }
+}
+
+private fun signed(t: Int) = if (t > 0) "+$t" else "$t"
+
+/** Номер дня по местному времени устройства: 2026-11-12 → 20261112. */
+internal fun dayKey(at: Long): Int {
+    val c = java.util.Calendar.getInstance()
+    c.timeInMillis = at
+    return c.get(java.util.Calendar.YEAR) * 10000 + (c.get(java.util.Calendar.MONTH) + 1) * 100 +
+        c.get(java.util.Calendar.DAY_OF_MONTH)
 }
 
 /** Час прогноза: время начала (мс) и вид осадков; null — без осадков. */
